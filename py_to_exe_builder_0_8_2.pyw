@@ -1,7 +1,22 @@
 # -*- coding: utf-8 -*-
 """
 Py To EXE Builder
-Версия: 0.8.1  (PySide6 / Qt6)
+Версия: 0.8.2  (PySide6 / Qt6)
+
+Изменения 0.8.2 (по итогам код-аудита):
+- 🛑 Кнопка «Стоп» и корректное закрытие окна во время сборки/скачивания
+  (процессы PyInstaller/pip убиваются, потоки дожидаются).
+- 🐍 Сборщик, собранный в EXE (frozen), ищет настоящий python (py -3 / PATH)
+  для режима «Текущий Python» и для анализа импортов.
+- 🐛 Файлы с UTF-8 BOM больше не теряют импорты; проект в папке с именем
+  dist/build/env больше не даёт «0 импортов».
+- 🐛 VC++ Runtime DLL берутся под разрядность цели (x86 → SysWOW64).
+- 🐛 Правильный путь к exe в режиме onedir, без подхвата устаревшего exe.
+- 📦 Перед pip показывается список пакетов на подтверждение; в «Свой Python»
+  ставятся только отсутствующие пакеты без -U; кэш хеша зависимостей.
+- 🪟 yt-dlp_win7.exe вшивается только если проект использует yt_dlp.
+- ⚡ Проверка python и поиск UPX больше не блокируют окно; лог ограничен.
+- 🔒 UPX закреплён на версии 4.2.4; SHA256-проверка для известных хешей.
 
 Изменения 0.8.1:
 - 🐛 Фикс: если в настройках сохранён режим «📁 Свой Python» без пути к
@@ -284,7 +299,7 @@ Py To EXE Builder
 Автор: RomzesPRA-2026.
 """
 
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.8.2"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 
@@ -295,15 +310,20 @@ import json
 import math
 import os
 import shutil
+import platform
 import struct
 import subprocess
 import sys
 import sysconfig
+import tempfile
+import time
+import hashlib
+from html import escape as html_escape
 import urllib.request
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QSettings, QSize, QRect, QPoint
+from PySide6.QtCore import Qt, QThread, Signal, QSettings, QSize, QRect, QPoint, QTimer
 from PySide6.QtGui import (
     QPixmap, QPainter, QColor, QLinearGradient, QRadialGradient,
     QFont, QBrush, QPalette, QAction, QActionGroup, QGuiApplication, QIcon,
@@ -887,7 +907,7 @@ def read_python_imports(file_path):
     tops = set()
     dotted = set()
     try:
-        tree = ast.parse(Path(file_path).read_text(encoding="utf-8", errors="ignore"))
+        tree = ast.parse(Path(file_path).read_text(encoding="utf-8-sig", errors="ignore"))
     except Exception:
         return tops, dotted
 
@@ -930,8 +950,14 @@ def _inside_python_install(path):
     return False
 
 
+# Лимит файлов при анализе (защита от выбора корня диска и т.п.).
+MAX_SCAN_PY_FILES = 5000
+
+
 def collect_project_imports(project_dir):
-    """Возвращает (top_imports, dotted_imports, py_files)."""
+    """Возвращает (top_imports, dotted_imports, py_files).
+    Обход через os.walk: служебные папки отсекаются ОТНОСИТЕЛЬНО проекта
+    (раньше проверялся абсолютный путь → проект в D:\\dist\\app давал 0 импортов)."""
     tops = set()
     dotted = set()
     py_files = []
@@ -943,35 +969,44 @@ def collect_project_imports(project_dir):
         "_portable_pythons", "_py_to_exe_builder", "EXE_Output",
         "site-packages",
     }
-    for path in Path(project_dir).rglob("*.py*"):
-        if any(part in skip_dirs for part in path.parts):
-            continue
+    for root, dirnames, filenames in os.walk(project_dir):
+        root_p = Path(root)
         # Lib/Scripts/Include пропускаем только внутри реального Python/venv.
-        if _inside_python_install(path):
-            continue
-        if path.suffix.lower() not in {".py", ".pyw"}:
-            continue
-        py_files.append(path)
-        t, d = read_python_imports(path)
-        tops.update(t)
-        dotted.update(d)
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in skip_dirs and not _inside_python_install(root_p / d / "x")
+        ]
+        for fn in filenames:
+            if Path(fn).suffix.lower() not in {".py", ".pyw"}:
+                continue
+            path = root_p / fn
+            py_files.append(path)
+            t, d = read_python_imports(path)
+            tops.update(t)
+            dotted.update(d)
+            if len(py_files) >= MAX_SCAN_PY_FILES:
+                return tops, dotted, py_files
     return tops, dotted, py_files
 
 
-def local_module_names(project_dir):
+def local_module_names(project_dir, extra_dirs=()):
+    """Локальные модули: верхний уровень проекта, папка src/ и доп. папки
+    (например, папка главного файла)."""
     names = set()
     project_dir = Path(project_dir)
-    try:
-        items = list(project_dir.iterdir())
-    except Exception:
-        return names
-    for path in items:
-        if path.name.startswith("."):
+    bases = [project_dir, project_dir / "src", *[Path(x) for x in extra_dirs]]
+    for base in bases:
+        try:
+            items = list(base.iterdir())
+        except Exception:
             continue
-        if path.is_file() and path.suffix.lower() in {".py", ".pyw"}:
-            names.add(path.stem)
-        elif path.is_dir() and (path / "__init__.py").exists():
-            names.add(path.name)
+        for path in items:
+            if path.name.startswith("."):
+                continue
+            if path.is_file() and path.suffix.lower() in {".py", ".pyw"}:
+                names.add(path.stem)
+            elif path.is_dir() and (path / "__init__.py").exists():
+                names.add(path.name)
     return names
 
 
@@ -1016,8 +1051,22 @@ def classify_import(name, project_dir, local_names=None):
     return "third-party"
 
 
+_PKG_DISTS_CACHE = None
+
+
+def _packages_distributions():
+    """Кэш packages_distributions(): полный обход дистрибутивов — дорогой."""
+    global _PKG_DISTS_CACHE
+    if _PKG_DISTS_CACHE is None:
+        try:
+            _PKG_DISTS_CACHE = importlib.metadata.packages_distributions()
+        except Exception:
+            _PKG_DISTS_CACHE = {}
+    return _PKG_DISTS_CACHE
+
+
 def package_version(import_name):
-    packages = importlib.metadata.packages_distributions()
+    packages = _packages_distributions()
     dist_names = packages.get(import_name, [])
     if not dist_names:
         return None
@@ -3066,13 +3115,20 @@ VC_RUNTIME_DLLS = [
 ]
 
 
-def find_vc_runtime_dlls():
-    """Ищет VC++ runtime DLL в стандартных местах. Возвращает список (имя, путь)."""
-    sysroot = os.environ.get("SystemRoot", r"C:\Windows")
-    search_dirs = [
-        Path(sysroot) / "System32",
-        Path(sysroot) / "SysWOW64",
-    ]
+def find_vc_runtime_dlls(arch="amd64"):
+    """Ищет VC++ runtime DLL ПОД РАЗРЯДНОСТЬ ЦЕЛИ. Возвращает список (имя, путь).
+    amd64 → 64-битный System32 (через Sysnative, если сборщик 32-битный);
+    win32 → SysWOW64 на 64-бит ОС (или System32 на 32-бит ОС);
+    arm64 → не бандлим (в System32 x64/ARM64 смесь — риск не той архитектуры)."""
+    sysroot = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    if arch == "arm64":
+        return []
+    if arch == "win32":
+        wow = sysroot / "SysWOW64"
+        search_dirs = [wow] if wow.exists() else [sysroot / "System32"]
+    else:
+        native = sysroot / "Sysnative"  # виден только 32-битному процессу на 64-бит ОС
+        search_dirs = [native if native.exists() else sysroot / "System32"]
     found = []
     seen = set()
     for d in search_dirs:
@@ -3121,8 +3177,16 @@ def _crash_excepthook(exc_type, exc_value, exc_tb):
             exe_name = os.path.splitext(os.path.basename(exe_path))[0] or "app"
 
         log_path = os.path.join(exe_dir, exe_name + "_crash.log")
+        try:
+            f = open(log_path, "a", encoding="utf-8")
+        except Exception:
+            # Нет прав рядом с exe (Program Files) — пишем в LOCALAPPDATA/TEMP.
+            import tempfile
+            alt = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+            log_path = os.path.join(alt, exe_name + "_crash.log")
+            f = open(log_path, "a", encoding="utf-8")
 
-        with open(log_path, "a", encoding="utf-8") as f:
+        with f:
             f.write("=" * 70 + "\n")
             f.write("CRASH at " + datetime.datetime.now().isoformat() + "\n")
             f.write("Python: " + sys.version + "\n")
@@ -3196,13 +3260,33 @@ class AnalyzeWorker(QThread):
             tops, dotted, py_files = collect_project_imports(self.project_dir)
             tops = sorted(tops)
             self.log.emit(f"Python-файлов найдено: {len(py_files)}")
+            if len(py_files) >= MAX_SCAN_PY_FILES:
+                self.log.emit(f"⚠ Достигнут лимит {MAX_SCAN_PY_FILES} файлов — анализ неполный. "
+                              "Выбери папку проекта точнее (не корень диска).")
             self.log.emit(f"Импортов (top-level): {len(tops)}")
             self.log.emit(f"Импортов (полных dotted): {len(dotted)}")
 
             third, unknown, local, stdlib = [], [], [], []
-            _local_names = local_module_names(self.project_dir)  # кэш: один вызов на весь анализ
+            _local_names = local_module_names(self.project_dir, (self.main_file.parent,))  # кэш
+            # Frozen-сборщик (EXE): find_spec внутри него ничего не находит —
+            # классифицируем через настоящий python во внешнем процессе.
+            ext_kinds = {}
+            if getattr(sys, "frozen", False):
+                real_py = real_python_exe()
+                if real_py:
+                    ext_kinds = classify_imports_external(
+                        real_py, [n for n in tops if n not in _local_names])
+                    self.log.emit(f"🐍 Классификация импортов через: {real_py}")
+                else:
+                    self.log.emit("⚠ Сборщик запущен как EXE и не нашёл python в системе — "
+                                  "классификация импортов неточная.")
             for name in tops:
-                k = classify_import(name, self.project_dir, _local_names)
+                if name in _local_names:
+                    k = "local"
+                elif name in ext_kinds:
+                    k = ext_kinds[name]
+                else:
+                    k = classify_import(name, self.project_dir, _local_names)
                 if k == "third-party":
                     third.append(name)
                 elif k == "unknown":
@@ -3300,15 +3384,106 @@ def _hide_window_kwargs():
     return kwargs
 
 
+_REAL_PYTHON_CACHE = []
+
+
+def real_python_exe():
+    """Путь к НАСТОЯЩЕМУ python.exe. Если сборщик не frozen — sys.executable.
+    Если frozen (сам сборщик собран в EXE) — sys.executable указывает на
+    сборщик, и `-m PyInstaller` запустил бы вторую копию GUI. Тогда ищем
+    python через `py -3` и PATH. None, если не найден."""
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    if _REAL_PYTHON_CACHE:
+        return _REAL_PYTHON_CACHE[0]
+    probe = "import sys; print(sys.executable)"
+    cands = []
+    if sys.platform.startswith("win") and shutil.which("py"):
+        cands.append([shutil.which("py"), "-3", "-c", probe])
+    for n in ("python", "python3"):
+        w = shutil.which(n)
+        if w:
+            cands.append([w, "-c", probe])
+    found = None
+    for c in cands:
+        try:
+            r = subprocess.run(c, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=15, **_hide_window_kwargs())
+            out = (r.stdout or "").strip().splitlines()
+            if r.returncode == 0 and out and Path(out[-1]).is_file():
+                found = out[-1]
+                break
+        except Exception:
+            continue
+    _REAL_PYTHON_CACHE.append(found)
+    return found
+
+
+_CLASSIFY_PROBE = r"""
+import sys, json, os, importlib.util, sysconfig
+names = json.loads(sys.stdin.read())
+std = os.path.normcase(os.path.realpath(sysconfig.get_paths().get('stdlib', '')))
+out = {}
+for n in names:
+    if n in sys.builtin_module_names:
+        out[n] = 'stdlib'; continue
+    try:
+        s = importlib.util.find_spec(n)
+    except Exception:
+        out[n] = 'unknown'; continue
+    if s is None:
+        out[n] = 'unknown'; continue
+    o = s.origin or ''
+    if o in ('built-in', 'frozen'):
+        out[n] = 'stdlib'; continue
+    locs = list(s.submodule_search_locations or [])
+    p = os.path.normcase(os.path.realpath(o if o and o != 'namespace' else (locs[0] if locs else '')))
+    if 'site-packages' in p or 'dist-packages' in p:
+        out[n] = 'third-party'
+    elif std and p.startswith(std):
+        out[n] = 'stdlib'
+    else:
+        out[n] = 'third-party'
+print(json.dumps(out))
+"""
+
+
+def classify_imports_external(python_exe, names):
+    """Классифицирует импорты в ДРУГОМ интерпретаторе. {name: kind} или {}."""
+    if not names:
+        return {}
+    try:
+        r = subprocess.run(
+            [python_exe, "-c", _CLASSIFY_PROBE], input=json.dumps(list(names)),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, cwd=tempfile.gettempdir(), **_hide_window_kwargs(),
+        )
+        if r.returncode == 0:
+            return json.loads((r.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        pass
+    return {}
+
+
+def missing_imports_external(python_exe, names):
+    """Какие из import-имён НЕ находятся в python_exe (find_spec is None)."""
+    if not names:
+        return []
+    kinds = classify_imports_external(python_exe, names)
+    if not kinds:
+        return list(names)
+    return [n for n in names if kinds.get(n, "unknown") == "unknown"]
+
+
 def detect_python_info(python_exe):
     """Запускает `python_exe -c ...` и возвращает dict с информацией:
        {ok, version, arch, has_pyinstaller, error}.
        python_exe='' или None → возвращает данные текущего sys.executable."""
-    target = (python_exe or "").strip() or sys.executable
+    target = (python_exe or "").strip() or real_python_exe() or ""
     info = {"ok": False, "version": "", "arch": "", "has_pyinstaller": False,
             "has_tkinter": False, "error": "", "exe": target}
-    p = Path(target)
-    if not p.is_file():
+    p = Path(target) if target else None
+    if not p or not p.is_file():
         info["error"] = "Файл не найден"
         return info
 
@@ -3563,14 +3738,133 @@ def write_cached_nicolaasjan_tag(tag):
         pass
 
 
+USER_AGENT = f"Py-To-EXE-Builder/{APP_VERSION}"
+
+
+class DownloadCancelled(Exception):
+    pass
+
+
+# Эталонные SHA256 скачиваемых файлов (url → hex). Если для url хеш задан —
+# файл проверяется; иначе в лог пишется «⚠ SHA256 не проверено».
+KNOWN_SHA256 = {}
+
+
+def download_file(url, dest, on_progress=None, cancel_check=None, timeout=60):
+    """Скачивает url → dest. on_progress(got, total). Возвращает sha256 (hex).
+    cancel_check() → True прерывает скачивание (DownloadCancelled)."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    h = hashlib.sha256()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        total = int(resp.headers.get("Content-Length") or 0)
+        got = 0
+        with open(dest, "wb") as f:
+            while True:
+                if cancel_check and cancel_check():
+                    raise DownloadCancelled("Отменено пользователем")
+                buf = resp.read(64 * 1024)
+                if not buf:
+                    break
+                f.write(buf)
+                h.update(buf)
+                got += len(buf)
+                if on_progress:
+                    on_progress(got, total)
+    return h.hexdigest()
+
+
+def verify_sha256(url, digest, log):
+    """True, если хеш совпал или эталона нет (с предупреждением)."""
+    expected = KNOWN_SHA256.get(url)
+    if not expected:
+        log(f"  ⚠ SHA256 не проверено (нет эталона): {Path(url).name} sha256={digest[:16]}…")
+        return True
+    if expected.lower() != digest.lower():
+        log(f"❌ SHA256 НЕ совпал для {url}: ожидался {expected}, получен {digest}")
+        return False
+    log(f"  ✓ SHA256 совпал: {Path(url).name}")
+    return True
+
+
+def _make_temp_path(suffix):
+    """Уникальный временный файл (вместо фиксированного имени в %TEMP%)."""
+    fd, name = tempfile.mkstemp(prefix="py2exe_", suffix=suffix)
+    os.close(fd)
+    return Path(name)
+
+
+SHIM_MARKER = "# Auto-generated by Py To EXE Builder."
+SUBPROCESS_HIDE_SHIM_CODE = (
+    SHIM_MARKER + "\n"
+    "# Hides console windows for all subprocess calls in this Python\n"
+    "# process (used to suppress upx.exe console flashes during UPX).\n"
+    "import sys\n"
+    "import os\n"
+    "import subprocess as _sp\n"
+    "if sys.platform.startswith('win'):\n"
+    "    _orig_init = _sp.Popen.__init__\n"
+    "    def _patched_init(self, *args, **kwargs):\n"
+    "        if 'startupinfo' not in kwargs or kwargs['startupinfo'] is None:\n"
+    "            si = _sp.STARTUPINFO()\n"
+    "            si.dwFlags |= _sp.STARTF_USESHOWWINDOW\n"
+    "            si.wShowWindow = _sp.SW_HIDE\n"
+    "            kwargs['startupinfo'] = si\n"
+    "        cf = kwargs.get('creationflags', 0) or 0\n"
+    "        kwargs['creationflags'] = cf | _sp.CREATE_NO_WINDOW\n"
+    "        return _orig_init(self, *args, **kwargs)\n"
+    "    _sp.Popen.__init__ = _patched_init\n"
+    "# Цепочка: выполняем «настоящий» sitecustomize пользователя, если он есть.\n"
+    "_here = os.path.dirname(os.path.abspath(__file__))\n"
+    "for _p in list(sys.path):\n"
+    "    try:\n"
+    "        if os.path.abspath(_p or '.') == _here:\n"
+    "            continue\n"
+    "        _f = os.path.join(_p, 'sitecustomize.py')\n"
+    "        if os.path.isfile(_f):\n"
+    "            with open(_f, encoding='utf-8') as _fh:\n"
+    "                exec(compile(_fh.read(), _f, 'exec'), {'__name__': 'sitecustomize', '__file__': _f})\n"
+    "            break\n"
+    "    except Exception:\n"
+    "        break\n"
+)
+
+
 class ConvertWorker(QThread):
     log = Signal(str)
-    done = Signal(int, str)   # exit_code, exe_path_or_empty
+    stage = Signal(str)       # текущий этап — в строку статуса
+    done = Signal(int, str)   # exit_code (-2 = остановлено), exe_path_or_empty
     failed = Signal(str)
 
     def __init__(self, params, parent=None):
         super().__init__(parent)
         self.p = params  # dict с настройками
+        self._proc = None
+        self._cancelled = False
+        self._info_cache = {}
+
+    def cancel(self):
+        """Останавливает сборку: флаг + убийство текущего процесса (с деревом)."""
+        self._cancelled = True
+        p = self._proc
+        if p is not None and p.poll() is None:
+            try:
+                if sys.platform.startswith("win"):
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                                   capture_output=True, timeout=15, **_hide_window_kwargs())
+                else:
+                    p.kill()
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
+    def _pyinfo(self, py_exe):
+        """detect_python_info с кэшем на время сборки."""
+        key = str(py_exe)
+        if key not in self._info_cache:
+            self._info_cache[key] = detect_python_info(key)
+        return self._info_cache[key]
 
     def _write_subprocess_hide_shim(self, workspace_dir):
         """Создаёт sitecustomize.py с патчем subprocess.Popen, скрывающим окна.
@@ -3578,45 +3872,22 @@ class ConvertWorker(QThread):
         shim_dir = Path(workspace_dir) / "_subprocess_hide_shim"
         shim_dir.mkdir(parents=True, exist_ok=True)
         shim_path = shim_dir / "sitecustomize.py"
-        shim_path.write_text(
-            "# Auto-generated by Py To EXE Builder.\n"
-            "# Hides console windows for all subprocess calls in this Python\n"
-            "# process (used to suppress upx.exe console flashes during UPX).\n"
-            "import sys\n"
-            "import subprocess as _sp\n"
-            "if sys.platform.startswith('win'):\n"
-            "    _orig_init = _sp.Popen.__init__\n"
-            "    def _patched_init(self, *args, **kwargs):\n"
-            "        if 'startupinfo' not in kwargs or kwargs['startupinfo'] is None:\n"
-            "            si = _sp.STARTUPINFO()\n"
-            "            si.dwFlags |= _sp.STARTF_USESHOWWINDOW\n"
-            "            si.wShowWindow = _sp.SW_HIDE\n"
-            "            kwargs['startupinfo'] = si\n"
-            "        cf = kwargs.get('creationflags', 0) or 0\n"
-            "        kwargs['creationflags'] = cf | _sp.CREATE_NO_WINDOW\n"
-            "        return _orig_init(self, *args, **kwargs)\n"
-            "    _sp.Popen.__init__ = _patched_init\n",
-            encoding="utf-8",
-        )
+        shim_path.write_text(SUBPROCESS_HIDE_SHIM_CODE, encoding="utf-8")
         return str(shim_dir)
 
     def _run_command(self, cmd, cwd=None):
+        if self._cancelled:
+            return -1
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
 
         # На Windows: скрываем все консольные окна (для самого PyInstaller
         # и для всех его дочерних процессов: upx.exe, pip и т.п.).
-        startupinfo = None
-        flags = 0
         if sys.platform.startswith("win"):
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-            flags = subprocess.CREATE_NO_WINDOW
-
             # Подключаем sitecustomize-шим: при старте PyInstaller автоматически
-            # импортируется sitecustomize, который патчит subprocess.Popen,
-            # подставляя SW_HIDE и CREATE_NO_WINDOW во ВСЕ вызовы upx.exe и др.
+            # импортируется sitecustomize, который патчит subprocess.Popen.
+            # (embeddable Python игнорирует PYTHONPATH — для него шим кладётся
+            # прямо в site-packages, см. run()).
             shim_dir = getattr(self, "_site_shim_dir", None)
             if shim_dir:
                 cur_pp = env.get("PYTHONPATH", "")
@@ -3626,36 +3897,38 @@ class ConvertWorker(QThread):
             cmd, cwd=cwd,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             text=True, encoding="utf-8", errors="replace",
-            env=env, creationflags=flags, startupinfo=startupinfo,
+            env=env, **_hide_window_kwargs(),
         )
-        assert process.stdout is not None
-        for line in process.stdout:
-            self.log.emit(line.rstrip())
-        return process.wait()
+        self._proc = process
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                self.log.emit(line.rstrip())
+            code = process.wait()
+        finally:
+            self._proc = None
+        return -1 if self._cancelled else code
 
     # ---------- Portable Python setup ----------
 
     def _download_with_progress(self, url, dest, label="файл"):
-        """Скачивает url → dest, эмитит прогресс в лог."""
-        req = urllib.request.Request(url, headers={"User-Agent": "Py-To-EXE-Builder/0.7.6"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            total = int(resp.headers.get("Content-Length", 0) or 0)
-            got = 0
-            last_pct = -1
-            with open(dest, "wb") as f:
-                while True:
-                    buf = resp.read(64 * 1024)
-                    if not buf:
-                        break
-                    f.write(buf)
-                    got += len(buf)
-                    if total > 0:
-                        pct = int(got * 100 / total)
-                        if pct >= last_pct + 10:
-                            last_pct = pct
-                            mb_got = got / 1024 / 1024
-                            mb_tot = total / 1024 / 1024
-                            self.log.emit(f"  ⬇ {label}: {pct}% ({mb_got:.1f}/{mb_tot:.1f} MB)")
+        """Скачивает url → dest, эмитит прогресс в лог, проверяет SHA256 (если известен)."""
+        state = {"last": -10}
+
+        def prog(got, total):
+            if total > 0:
+                pct = int(got * 100 / total)
+                if pct >= state["last"] + 10:
+                    state["last"] = pct
+                    self.log.emit(f"  ⬇ {label}: {pct}% ({got / 1048576:.1f}/{total / 1048576:.1f} MB)")
+
+        digest = download_file(url, dest, prog, lambda: self._cancelled)
+        if not verify_sha256(url, digest, self.log.emit):
+            try:
+                Path(dest).unlink()
+            except Exception:
+                pass
+            raise RuntimeError(f"SHA256 не совпал: {label}")
         self.log.emit(f"  ✓ {label} скачан: {dest}")
 
     def _patch_embed_pth(self, pdir, version):
@@ -3701,6 +3974,16 @@ class ConvertWorker(QThread):
                 f"Выбери x64/x86 или более новую целевую ОС (Win10/11)."
             )
             return None
+
+        host = platform.machine().lower()
+        if sys.platform.startswith("win"):
+            if arch == "arm64" and "arm" not in host:
+                self.log.emit(f"❌ ARM64-Python нельзя запустить на этом ПК ({host}): PyInstaller не "
+                              "умеет кросс-сборку. Собирай ARM64 на ARM-устройстве или выбери x64/x86.")
+                return None
+            if arch == "amd64" and host in ("x86", "i386", "i686"):
+                self.log.emit("❌ x64-Python не запустится на 32-битной Windows. Выбери x86.")
+                return None
 
         pdir = portable_python_dir(version, arch)
         pexe = pdir / "python.exe"
@@ -3755,6 +4038,7 @@ class ConvertWorker(QThread):
                 self.log.emit(f"❌ Не удалось скачать get-pip.py: {exc}")
                 return None
             self.log.emit("📦 Установка pip...")
+            self.stage.emit("Установка pip...")
             if self._run_command([str(pexe), str(gp_path), "--no-warn-script-location"]) != 0:
                 self.log.emit("❌ get-pip.py завершился с ошибкой.")
                 return None
@@ -3794,15 +4078,21 @@ class ConvertWorker(QThread):
                 result.append(pkg)
         return result, skipped
 
-    def _install_project_deps(self, py_exe):
-        """Ставит все third-party зависимости проекта в выбранный python.
-        Возвращает True даже если часть пакетов не поставилась (warning), False — критическая ошибка."""
-        third = sorted(set(self.p.get("third") or []))
-        if not third:
-            self.log.emit("Нет third-party зависимостей для установки.")
+    def _install_project_deps(self, py_exe, workspace_dir):
+        """Ставит НЕДОСТАЮЩИЕ зависимости проекта в выбранный python (список
+        подтверждён пользователем: params["install_names"]). Без -U для чужого
+        Python — не обновляем рабочее окружение пользователя. Хеш набора
+        кэшируется в workspace: если не менялся — pip не запускается.
+        Возвращает True даже если часть пакетов не поставилась (warning)."""
+        names = self.p.get("install_names")
+        if names is None:
+            names = self.p.get("third") or []
+        names = sorted({n for n in names if is_installable_dep(n)})
+        if not names:
+            self.log.emit("Нет зависимостей для установки.")
             return True
 
-        info = detect_python_info(py_exe)
+        info = self._pyinfo(py_exe)
         if not info["ok"]:
             self.log.emit(f"❌ Python не отвечает: {info['error']}")
             return False
@@ -3811,24 +4101,26 @@ class ConvertWorker(QThread):
         except Exception:
             ver_tuple = (3, 8, 0)
 
-        # Сначала апгрейд pip + базовые инструменты сборки колёс.
+        portable = self.p.get("python_mode") in ("win7", "win10", "win11")
+        specs_all, skipped = self._resolve_build_pins(ver_tuple, names)
+        dep_hash = hashlib.sha256("\n".join([str(py_exe)] + sorted(specs_all)).encode("utf-8")).hexdigest()
+        hash_file = Path(workspace_dir) / "deps_hash.txt"
+        try:
+            if hash_file.read_text(encoding="utf-8").strip() == dep_hash:
+                self.log.emit("✓ Набор зависимостей не менялся (кэш) — pip пропущен.")
+                return True
+        except Exception:
+            pass
+
         self.log.emit("")
         self.log.emit("=== Установка зависимостей проекта ===")
-        self._run_command([py_exe, "-m", "pip", "install", "-U", "pip", "setuptools", "wheel"])
-
-        specs, skipped = self._resolve_build_pins(ver_tuple, third)
+        self.stage.emit("Установка зависимостей...")
         self.log.emit(f"🐍 Python {info['version']} ({info['arch']})")
-        self.log.emit(f"📦 Найдено импортов: {len(third)}, к установке: {len(specs)}, пропущено: {len(skipped)}")
-        if skipped:
-            self.log.emit(f"   ⊘ Пропущено (stdlib/инфра/denylist): {', '.join(skipped[:12])}"
-                          + (f", +{len(skipped) - 12}..." if len(skipped) > 12 else ""))
 
         # Логируем алиасы и пины.
         alias_msgs = []
         pin_msgs = []
-        for orig in third:
-            if not is_installable_dep(orig):
-                continue
+        for orig in names:
             pkg = import_to_pip_name(orig)
             pinned = (PY38_PINS.get(orig) or PY38_PINS.get(pkg)) if ver_tuple[:2] <= (3, 8) else None
             if pkg != orig:
@@ -3840,28 +4132,48 @@ class ConvertWorker(QThread):
                           + (f", +{len(alias_msgs) - 8}..." if len(alias_msgs) > 8 else ""))
         if pin_msgs:
             self.log.emit(f"  📌 Пин-версии для Python {info['version']}: {', '.join(pin_msgs)}")
-            if ver_tuple[:2] <= (3, 8):
-                self.log.emit("  ℹ Для запуска на Windows 7 нужны старые версии библиотек "
-                              "(Qt 6.2+ официально требует Win10).")
+            self.log.emit("  ℹ Для запуска на Windows 7 нужны старые версии библиотек "
+                          "(Qt 6.2+ официально требует Win10).")
+
+        missing = missing_imports_external(py_exe, names)
+        if not missing:
+            self.log.emit("✓ Все зависимости уже установлены.")
+            try:
+                hash_file.write_text(dep_hash, encoding="utf-8")
+            except Exception:
+                pass
+            return True
+        specs, _ = self._resolve_build_pins(ver_tuple, missing)
+        self.log.emit(f"📦 Импортов: {len(names)}, отсутствует: {len(missing)}, к установке: {len(specs)}")
+
+        if portable:
+            # Своё окружение сборщика — можно обновлять pip/setuptools.
+            self._run_command([py_exe, "-m", "pip", "install", "-U", "pip", "setuptools", "wheel"])
+        upgrade = ["-U"] if portable else []
 
         if not specs:
-            self.log.emit("Нет зависимостей для установки (после фильтрации).")
             return True
-
-        cmd = [py_exe, "-m", "pip", "install", "-U", "--no-warn-script-location"] + specs
+        cmd = [py_exe, "-m", "pip", "install", *upgrade, "--no-warn-script-location"] + specs
         rc = self._run_command(cmd)
-        if rc != 0:
+        failed = []
+        if rc != 0 and not self._cancelled:
             self.log.emit("⚠ Часть зависимостей не поставилась. Пробую по одному...")
-            failed = []
             for spec in specs:
+                if self._cancelled:
+                    break
                 rc1 = self._run_command(
-                    [py_exe, "-m", "pip", "install", "-U", "--no-warn-script-location", spec]
+                    [py_exe, "-m", "pip", "install", *upgrade, "--no-warn-script-location", spec]
                 )
                 if rc1 != 0:
                     failed.append(spec)
             if failed:
                 self.log.emit(f"⚠ Не удалось поставить (не критично, если это опциональные): {', '.join(failed)}")
                 # НЕ возвращаем False — пусть PyInstaller всё равно попробует.
+        if not failed and not self._cancelled:
+            try:
+                hash_file.write_text(dep_hash, encoding="utf-8")
+            except Exception:
+                pass
         self.log.emit("✓ Зависимости готовы")
         return True
 
@@ -3883,7 +4195,7 @@ class ConvertWorker(QThread):
             req = urllib.request.Request(
                 api_url,
                 headers={
-                    "User-Agent": "Py-To-EXE-Builder/0.7.7",
+                    "User-Agent": USER_AGENT,
                     "Accept": "application/vnd.github+json",
                 },
             )
@@ -3945,18 +4257,26 @@ class ConvertWorker(QThread):
         mode = (self.p.get("python_mode") or "current").strip()
 
         if mode == "current":
-            self.log.emit(
-                f"🐍 Python для сборки: текущий "
-                f"({sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})"
-            )
-            return sys.executable
+            py = real_python_exe()
+            if not py:
+                self.log.emit("❌ Сборщик запущен как EXE, а python в системе не найден "
+                              "(py -3 / PATH). Выбери «Свой Python» или portable-режим.")
+                return None
+            if py == sys.executable:
+                self.log.emit(
+                    f"🐍 Python для сборки: текущий "
+                    f"({sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})"
+                )
+            else:
+                self.log.emit(f"🐍 Python для сборки (найден в системе): {py}")
+            return py
 
         if mode == "custom":
             custom = (self.p.get("python_exe") or "").strip()
             if not custom or not Path(custom).is_file():
                 self.log.emit("❌ Свой Python: путь не задан или файл не найден.")
                 return None
-            info = detect_python_info(custom)
+            info = self._pyinfo(custom)
             if not info["ok"]:
                 self.log.emit(f"❌ Свой Python не отвечает: {info['error']}")
                 return None
@@ -3978,16 +4298,20 @@ class ConvertWorker(QThread):
 
         is_current = (py_exe == sys.executable)
 
-        # Для portable/custom — поставить зависимости проекта.
+        # Для portable/custom (и python, найденного frozen-сборщиком) — поставить зависимости.
         if not is_current:
-            if not self._install_project_deps(py_exe):
+            ws = project_workspace_dir(self.p["project_dir"])
+            ws.mkdir(parents=True, exist_ok=True)
+            if not self._install_project_deps(py_exe, ws):
                 return None
+        if self._cancelled:
+            return None
 
         # Проверка PyInstaller.
         if is_current:
             has_pi = importlib.util.find_spec("PyInstaller") is not None
         else:
-            info = detect_python_info(py_exe)
+            info = self._pyinfo(py_exe)
             has_pi = bool(info["ok"] and info["has_pyinstaller"])
 
         if has_pi:
@@ -4000,6 +4324,7 @@ class ConvertWorker(QThread):
             return None
 
         self.log.emit("PyInstaller не найден. Ставлю автоматически...")
+        self.stage.emit("Установка PyInstaller...")
         if self._run_command([py_exe, "-m", "pip", "install", "-U", "pyinstaller"]) != 0:
             self.log.emit("❌ Не удалось установить PyInstaller.")
             return None
@@ -4040,7 +4365,11 @@ class ConvertWorker(QThread):
                     app_name = f"{app_name}{arch_tag}"
                     self.log.emit(f"🏗 Арх. {build_arch}: имя exe → {app_name}.exe")
 
+            self.stage.emit("Подготовка Python...")
             build_python = self._ensure_pyinstaller()
+            if self._cancelled:
+                self.done.emit(-2, "")
+                return
             if not build_python:
                 self.log.emit("Сборка остановлена: не удалось подготовить Python/PyInstaller.")
                 self.done.emit(-1, "")
@@ -4051,7 +4380,7 @@ class ConvertWorker(QThread):
             # tkinter/tcl/tk — тогда никакой --collect-all не спасёт. Предупреждаем
             # до сборки, а не после её падения.
             if self.p.get("uses_tkinter"):
-                tk_info = detect_python_info(build_python)
+                tk_info = self._pyinfo(build_python)
                 if tk_info.get("ok") and not tk_info.get("has_tkinter"):
                     self.log.emit("")
                     self.log.emit("⚠ ВНИМАНИЕ: проект использует tkinter, но в выбранном Python "
@@ -4083,6 +4412,17 @@ class ConvertWorker(QThread):
             # скрытым окном. Это убирает мелькание чёрных консолей при UPX.
             if sys.platform.startswith("win"):
                 self._site_shim_dir = self._write_subprocess_hide_shim(workspace_dir)
+                # embeddable Python (._pth) игнорирует PYTHONPATH — кладём шим
+                # прямо в его site-packages (только если там нет чужого sitecustomize).
+                if self.p.get("python_mode") in ("win7", "win10", "win11"):
+                    sp_shim = Path(build_python).parent / "Lib" / "site-packages" / "sitecustomize.py"
+                    try:
+                        if (not sp_shim.exists()
+                                or sp_shim.read_text(encoding="utf-8", errors="ignore").startswith(SHIM_MARKER)):
+                            sp_shim.parent.mkdir(parents=True, exist_ok=True)
+                            sp_shim.write_text(SUBPROCESS_HIDE_SHIM_CODE, encoding="utf-8")
+                    except Exception as exc:
+                        self.log.emit(f"⚠ Не удалось установить шим скрытия окон: {exc}")
             else:
                 self._site_shim_dir = None
 
@@ -4095,9 +4435,11 @@ class ConvertWorker(QThread):
                 if old_exe.exists():
                     try:
                         old_exe.unlink()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        self.log.emit(f"⚠ Не удалось удалить старый {old_exe.name} ({exc}). "
+                                      "Закрой запущенный exe — иначе сборка упадёт с PermissionError.")
 
+            self.stage.emit("Подготовка команды сборки...")
             cmd = [
                 build_python, "-m", "PyInstaller",
                 "--name", app_name,
@@ -4144,7 +4486,11 @@ class ConvertWorker(QThread):
 
             # ------- Универсальный режим: VC++ runtime DLLs -------
             if universal:
-                rt_dlls = find_vc_runtime_dlls()
+                if self.p.get("python_mode") in ("win7", "win10", "win11"):
+                    target_arch = build_arch
+                else:
+                    target_arch = "win32" if self._pyinfo(build_python).get("arch") == "32-bit" else "amd64"
+                rt_dlls = find_vc_runtime_dlls(target_arch)
                 if rt_dlls:
                     self.log.emit("")
                     self.log.emit(f"🌍 Bundle VC++ Runtime: {len(rt_dlls)} DLL найдено")
@@ -4200,7 +4546,8 @@ class ConvertWorker(QThread):
                     self.log.emit("⚠ ffmpeg.exe не найден в PATH. Скачай и положи рядом с проектом или укажи путь.")
 
             # ------- Win7-режим: bundle yt-dlp_win7.exe (nicolaasjan) -------
-            if is_win7_mode:
+            uses_ytdlp = "yt_dlp" in set(self.p.get("third") or []) | set(self.p.get("unknown") or [])
+            if is_win7_mode and uses_ytdlp:
                 ytdlp_exe = self._ensure_nicolaasjan_ytdlp()
                 if ytdlp_exe:
                     cmd.extend(["--add-binary", f"{ytdlp_exe};."])
@@ -4259,13 +4606,8 @@ class ConvertWorker(QThread):
                 # Базовые stdlib-encodings, безопасно везде.
                 hidden |= {"encodings", "encodings.idna", "encodings.utf_8", "_cffi_backend"}
 
-            if max_compat:
-                # При полной совместимости — все используемые Qt-модули.
-                for binding, used in qt_used.items():
-                    for mod in used:
-                        hidden.add(f"{binding}.{mod}")
-            elif auto_opt:
-                # При авто-оптимизации тоже явно укажем нужные подмодули Qt.
+            if max_compat or auto_opt:
+                # Явно указываем используемые подмодули Qt.
                 for binding, used in qt_used.items():
                     for mod in used:
                         hidden.add(f"{binding}.{mod}")
@@ -4289,14 +4631,16 @@ class ConvertWorker(QThread):
                 # подтягивают plugins/translations ТОЛЬКО для нужных модулей.
                 # Просто перечисляем нужные модули через --hidden-import (это уже
                 # сделано выше), и не мешаем хукам своей дополнительной сборкой.
+                # Для не-Qt пакетов: submodules + data (без лишних бинарников).
+                # Полный --collect-all — только для пакетов, которые грузят DLL
+                # вручную (ctypes) и иначе не работают.
                 for name in third_list:
                     if name in QT_BINDINGS:
-                        # Только --collect-data для самого пакета (qt.conf, мелочи) —
-                        # без plugins/translations, их подтянут хуки сами.
-                        pass
-                    else:
-                        # Для не-Qt пакетов (yt_dlp, requests, ...) — полный collect.
+                        continue
+                    if name in AUTO_OPT_COLLECT_ALL:
                         cmd.extend(["--collect-all", name])
+                    else:
+                        cmd.extend(["--collect-submodules", name, "--collect-data", name])
             elif collect_all:
                 for name in third_list:
                     cmd.extend(["--collect-all", name])
@@ -4341,13 +4685,20 @@ class ConvertWorker(QThread):
 
             self.log.emit("")
             self.log.emit("=== Команда сборки ===")
-            self.log.emit(" ".join(f'"{x}"' if " " in x else x for x in cmd))
+            self.log.emit(subprocess.list2cmdline([str(x) for x in cmd]))
             self.log.emit("")
             self.log.emit("=== Сборка ===")
+            self.stage.emit("Сборка PyInstaller...")
 
+            build_start = time.time()
             code = self._run_command(cmd, cwd=str(project_dir))
-            exe_path = dist_dir / f"{app_name}.exe"
-            self.done.emit(code, str(exe_path) if exe_path.exists() else "")
+            if self._cancelled:
+                self.done.emit(-2, "")
+                return
+            # onedir: dist/<name>/<name>.exe; onefile: dist/<name>.exe.
+            exe_path = dist_dir / f"{app_name}.exe" if onefile else dist_dir / app_name / f"{app_name}.exe"
+            fresh = exe_path.exists() and exe_path.stat().st_mtime >= build_start - 2
+            self.done.emit(code, str(exe_path) if fresh else "")
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -4372,13 +4723,14 @@ class FfmpegDownloadWorker(QThread):
     def __init__(self, target_dir, parent=None):
         super().__init__(parent)
         self.target_dir = Path(target_dir)
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
+        tmp_zip = None
         try:
-            import urllib.request
-            import zipfile
-            import tempfile
-
             self.target_dir.mkdir(parents=True, exist_ok=True)
 
             # Если уже есть — ничего не делаем.
@@ -4390,32 +4742,25 @@ class FfmpegDownloadWorker(QThread):
                 self.done.emit(str(self.target_dir))
                 return
 
-            tmp_zip = Path(tempfile.gettempdir()) / "ffmpeg_btbn_win64.zip"
+            tmp_zip = _make_temp_path(".zip")
             self.log.emit(f"Скачивание: {FFMPEG_DOWNLOAD_URL}")
             self.log.emit(f"Во временный файл: {tmp_zip}")
 
-            req = urllib.request.Request(
-                FFMPEG_DOWNLOAD_URL,
-                headers={"User-Agent": "Mozilla/5.0 PyToExeBuilder"},
-            )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                total = int(resp.headers.get("Content-Length") or 0)
-                downloaded = 0
-                last_pct = -1
-                with open(tmp_zip, "wb") as f:
-                    while True:
-                        chunk = resp.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total > 0:
-                            pct = int(downloaded * 100 / total)
-                            if pct != last_pct:
-                                self.progress.emit(pct)
-                                last_pct = pct
+            state = {"last": -1, "got": 0}
 
-            self.log.emit(f"Скачано: {downloaded // (1024 * 1024)} МБ. Распаковка...")
+            def prog(got, total):
+                state["got"] = got
+                if total > 0:
+                    pct = int(got * 100 / total)
+                    if pct != state["last"]:
+                        state["last"] = pct
+                        self.progress.emit(pct)
+
+            digest = download_file(FFMPEG_DOWNLOAD_URL, tmp_zip, prog, lambda: self._cancelled)
+            if not verify_sha256(FFMPEG_DOWNLOAD_URL, digest, self.log.emit):
+                self.failed.emit("SHA256 архива ffmpeg не совпал.")
+                return
+            self.log.emit(f"Скачано: {state['got'] // (1024 * 1024)} МБ. Распаковка...")
 
             # Распаковываем только нужные exe'шники (не всю папку с doc/presets).
             extracted = 0
@@ -4429,11 +4774,6 @@ class FfmpegDownloadWorker(QThread):
                         self.log.emit(f"  + {dest.name}")
                         extracted += 1
 
-            try:
-                tmp_zip.unlink()
-            except Exception:
-                pass
-
             if extracted == 0:
                 self.failed.emit("В архиве не найдены ffmpeg.exe / ffprobe.exe.")
                 return
@@ -4444,11 +4784,27 @@ class FfmpegDownloadWorker(QThread):
 
         except Exception as exc:
             self.failed.emit(str(exc))
+        finally:
+            if tmp_zip is not None:
+                try:
+                    tmp_zip.unlink()
+                except Exception:
+                    pass
 
 
 # ----------------------- Авто-скачивание UPX -----------------------
 
-UPX_GITHUB_API = "https://api.github.com/repos/upx/upx/releases/latest"
+# Версия UPX закреплена (а не «latest»): воспроизводимость + supply-chain.
+UPX_VERSION = "4.2.4"
+UPX_DOWNLOAD_URL = (f"https://github.com/upx/upx/releases/download/v{UPX_VERSION}/"
+                    f"upx-{UPX_VERSION}-win64.zip")
+
+# Пакеты, которым в режиме авто-оптимизации всё-таки нужен --collect-all
+# (DLL/данные грузятся вручную через ctypes/пути).
+AUTO_OPT_COLLECT_ALL = {
+    "customtkinter", "tkinterdnd2", "imageio_ffmpeg", "pyzbar", "vlc",
+    "sounddevice", "soundfile", "certifi",
+}
 
 # DLL/PYD, которые НЕ нужно сжимать UPX'ом (могут не запуститься после).
 # Это известные проблемные точки для PySide6 и нативных Python-расширений.
@@ -4468,21 +4824,21 @@ UPX_EXCLUDE_PATTERNS = [
 
 
 def find_upx(workspace_dir):
-    """Ищет upx.exe: в workspace, рядом с проектом, в PATH."""
+    """Ищет upx.exe: в workspace/upx (ограниченно) и в PATH.
+    Раньше был rglob по всему workspace, включая build/ с тысячами файлов."""
     name = "upx.exe" if sys.platform.startswith("win") else "upx"
 
-    candidates = []
     if workspace_dir:
-        candidates.append(Path(workspace_dir) / "upx")
-        candidates.append(Path(workspace_dir) / "upx" / "upx-4.2.4-win64")  # частый layout
-        candidates.append(Path(workspace_dir))
-
-    for d in candidates:
-        if not d.exists():
-            continue
-        # ищем рекурсивно (UPX распаковывается в подпапку с версией в имени)
-        for p in d.rglob(name):
-            return str(p.parent)
+        base = Path(workspace_dir) / "upx"
+        cands = [base / name]
+        try:
+            # UPX может лежать в подпапке с версией в имени (upx-4.2.4-win64).
+            cands += [d / name for d in base.iterdir() if d.is_dir()]
+        except OSError:
+            pass
+        for p in cands:
+            if p.is_file():
+                return str(p.parent)
 
     # PATH
     in_path = shutil.which(name)
@@ -4492,7 +4848,7 @@ def find_upx(workspace_dir):
 
 
 class UpxDownloadWorker(QThread):
-    """Скачивает последний релиз UPX с GitHub и распаковывает upx.exe."""
+    """Скачивает закреплённую версию UPX с GitHub и распаковывает upx.exe."""
     progress = Signal(int)
     log = Signal(str)
     done = Signal(str)         # путь к папке с upx.exe
@@ -4501,65 +4857,40 @@ class UpxDownloadWorker(QThread):
     def __init__(self, target_dir, parent=None):
         super().__init__(parent)
         self.target_dir = Path(target_dir)
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
+        tmp_zip = None
         try:
-            import urllib.request, json, zipfile, tempfile
-
             self.target_dir.mkdir(parents=True, exist_ok=True)
 
             # Если уже есть — выходим.
-            existing = find_upx(self.target_dir.parent)
-            if existing and (Path(existing) / "upx.exe").exists():
-                self.log.emit(f"UPX уже на месте: {existing}")
+            if (self.target_dir / "upx.exe").exists():
+                self.log.emit(f"UPX уже на месте: {self.target_dir}")
                 self.progress.emit(100)
-                self.done.emit(existing)
+                self.done.emit(str(self.target_dir))
                 return
 
-            self.log.emit("Запрос последнего релиза UPX с GitHub API...")
-            req = urllib.request.Request(
-                UPX_GITHUB_API,
-                headers={"User-Agent": "PyToExeBuilder"},
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.load(resp)
+            self.log.emit(f"Скачивание UPX {UPX_VERSION}: {UPX_DOWNLOAD_URL}")
+            tmp_zip = _make_temp_path(".zip")
+            state = {"last": -1, "got": 0}
 
-            # Ищем win64 asset.
-            asset_url = None
-            asset_name = None
-            for asset in data.get("assets", []):
-                name = asset.get("name", "")
-                if "win64" in name and name.endswith(".zip"):
-                    asset_url = asset.get("browser_download_url")
-                    asset_name = name
-                    break
+            def prog(got, total):
+                state["got"] = got
+                if total > 0:
+                    pct = int(got * 100 / total)
+                    if pct != state["last"]:
+                        state["last"] = pct
+                        self.progress.emit(pct)
 
-            if not asset_url:
-                self.failed.emit("Не нашёл win64 zip в последнем релизе UPX.")
+            digest = download_file(UPX_DOWNLOAD_URL, tmp_zip, prog, lambda: self._cancelled)
+            if not verify_sha256(UPX_DOWNLOAD_URL, digest, self.log.emit):
+                self.failed.emit("SHA256 архива UPX не совпал.")
                 return
-
-            self.log.emit(f"Скачивание: {asset_url}")
-            tmp_zip = Path(tempfile.gettempdir()) / asset_name
-
-            req2 = urllib.request.Request(asset_url, headers={"User-Agent": "PyToExeBuilder"})
-            with urllib.request.urlopen(req2, timeout=60) as resp:
-                total = int(resp.headers.get("Content-Length") or 0)
-                downloaded = 0
-                last_pct = -1
-                with open(tmp_zip, "wb") as f:
-                    while True:
-                        chunk = resp.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total > 0:
-                            pct = int(downloaded * 100 / total)
-                            if pct != last_pct:
-                                self.progress.emit(pct)
-                                last_pct = pct
-
-            self.log.emit(f"Скачано: {downloaded // 1024} КБ. Распаковка...")
+            self.log.emit(f"Скачано: {state['got'] // 1024} КБ. Распаковка...")
 
             extracted_upx_dir = None
             with zipfile.ZipFile(tmp_zip) as zf:
@@ -4572,11 +4903,6 @@ class UpxDownloadWorker(QThread):
                         self.log.emit(f"  + upx.exe → {dest}")
                         break
 
-            try:
-                tmp_zip.unlink()
-            except Exception:
-                pass
-
             if not extracted_upx_dir:
                 self.failed.emit("upx.exe не найден в архиве.")
                 return
@@ -4587,6 +4913,28 @@ class UpxDownloadWorker(QThread):
 
         except Exception as exc:
             self.failed.emit(str(exc))
+        finally:
+            if tmp_zip is not None:
+                try:
+                    tmp_zip.unlink()
+                except Exception:
+                    pass
+
+
+class PythonProbeWorker(QThread):
+    """detect_python_info в фоне (не блокирует окно до 15 с)."""
+    done = Signal(str, dict)   # (путь, info)
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.path = path
+
+    def run(self):
+        try:
+            info = detect_python_info(self.path)
+        except Exception as exc:
+            info = {"ok": False, "error": str(exc)}
+        self.done.emit(self.path, info)
 
 
 # ----------------------- Диалог выбора встроенной иконки -----------------------
@@ -4912,6 +5260,20 @@ class ExeBuilderWindow(QMainWindow):
         # Флаг «пользователь отказался скачивать ffmpeg» — на одну сборку,
         # чтобы вопрос не задавался повторно после авто-скачивания UPX.
         self._ffmpeg_declined = False
+        # Контекст сборки, отложенной до скачивания ffmpeg/UPX.
+        self._pending_convert = None
+        self._stop_requested = False
+        self._upx_ready_dir = None
+        self._ffmpeg_worker = None
+        self._ffmpeg_worker_pre = None
+        self._upx_worker_pre = None
+        self._probe_workers = []
+        self._restoring = False
+        # Debounce карточки файла: iterdir не на каждый символ.
+        self._file_card_timer = QTimer(self)
+        self._file_card_timer.setSingleShot(True)
+        self._file_card_timer.setInterval(300)
+        self._file_card_timer.timeout.connect(self._refresh_file_card)
 
         self.third_party_imports = []
         self.unknown_imports = []
@@ -4998,7 +5360,7 @@ class ExeBuilderWindow(QMainWindow):
         self.main_file_edit = QLineEdit()
         self.main_file_edit.setClearButtonEnabled(True)
         self.main_file_edit.setPlaceholderText("Путь к главному .py / .pyw")
-        self.main_file_edit.textChanged.connect(self._refresh_file_card)
+        self.main_file_edit.textChanged.connect(lambda *_: self._file_card_timer.start())
         self._add_browse_action(self.main_file_edit, self.choose_main_file, "Выбрать .py")
         pl.addWidget(self._make_field("Главный файл", self.main_file_edit))
 
@@ -5124,6 +5486,14 @@ class ExeBuilderWindow(QMainWindow):
         self.analyze_btn.setToolTip("Анализировать проект без сборки")
         self.analyze_btn.clicked.connect(self.start_analyze)
         go.addWidget(self.analyze_btn)
+
+        self.stop_btn = QPushButton("⏹ Стоп")
+        self.stop_btn.setObjectName("ghostBtn")
+        self.stop_btn.setMinimumHeight(50)
+        self.stop_btn.setToolTip("Остановить сборку / скачивание")
+        self.stop_btn.clicked.connect(self.stop_build)
+        self.stop_btn.setVisible(False)
+        go.addWidget(self.stop_btn)
 
         self.open_output_btn = QPushButton("📂")
         self.open_output_btn.setObjectName("ghostBtn")
@@ -5283,6 +5653,7 @@ class ExeBuilderWindow(QMainWindow):
         self.log_view = QPlainTextEdit()
         self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(20000)  # длинный лог PyInstaller не тормозит UI
         self.log_view.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         f2 = QFont("Consolas, monospace"); f2.setStyleHint(QFont.Monospace); self.log_view.setFont(f2)
         lc.addWidget(self.log_view)
@@ -5362,10 +5733,9 @@ class ExeBuilderWindow(QMainWindow):
             n_py = sum(1 for x in p.parent.iterdir() if x.suffix.lower() in (".py", ".pyw"))
         except Exception:
             n_py = 0
-        from html import escape
         self.file_card_text.setText(
-            f"<b>{escape(p.name)}</b><br>"
-            f"<span style='color:#8b93a1'>{escape(str(p.parent))} · {n_py} .py</span>"
+            f"<b>{html_escape(p.name)}</b><br>"
+            f"<span style='color:#8b93a1'>{html_escape(str(p.parent))} · {n_py} .py</span>"
         )
         self.file_card.setVisible(True)
         self.drop_zone.setVisible(False)
@@ -5537,29 +5907,14 @@ class ExeBuilderWindow(QMainWindow):
         """Кнопка «Проверить»: показывает что будет использовано в текущем режиме."""
         mode = self._current_python_mode()
         spec = PORTABLE_PYTHONS.get(mode, {})
-        if mode == "current":
-            info = detect_python_info(sys.executable)
-            QMessageBox.information(
-                self, "Текущий Python",
-                f"Версия: {info.get('version', '?')} ({info.get('arch', '?')})\n"
-                f"PyInstaller: {'установлен' if info.get('has_pyinstaller') else 'НЕ установлен (будет авто-установка)'}\n\n"
-                f"Этот Python будет использован для сборки."
-            )
-            return
-        if mode == "custom":
-            path = self.python_exe_edit.text().strip()
-            if not path:
+        if mode in ("current", "custom"):
+            path = self.python_exe_edit.text().strip() if mode == "custom" else ""
+            if mode == "custom" and not path:
                 QMessageBox.warning(self, "Путь не задан", "Укажи путь к python.exe.")
                 return
-            info = detect_python_info(path)
-            if info["ok"]:
-                QMessageBox.information(
-                    self, "Свой Python",
-                    f"Версия: {info['version']} ({info['arch']})\n"
-                    f"PyInstaller: {'установлен' if info['has_pyinstaller'] else 'НЕ установлен (будет авто-установка)'}"
-                )
-            else:
-                QMessageBox.warning(self, "Python не работает", info["error"] or "Неизвестная ошибка")
+            # Проверка в фоне — окно не замирает (до 15 с на запуск python).
+            self.set_status("Проверка Python...")
+            self._start_probe(path, lambda p, info, m=mode: self._show_probe_result(m, info))
             return
 
         # Portable режим
@@ -5575,6 +5930,37 @@ class ExeBuilderWindow(QMainWindow):
         )
         QMessageBox.information(self, "Portable Python", msg)
 
+    def _start_probe(self, path, callback):
+        """Запускает PythonProbeWorker; callback(path, info) — в GUI-потоке."""
+        w = PythonProbeWorker(path)
+        w.done.connect(callback)
+        w.finished.connect(lambda w=w: self._probe_workers.remove(w) if w in self._probe_workers else None)
+        self._probe_workers.append(w)
+        w.start()
+
+    def _show_probe_result(self, mode, info):
+        self.set_status("")
+        title = "Текущий Python" if mode == "current" else "Свой Python"
+        if info.get("ok"):
+            QMessageBox.information(
+                self, title,
+                f"Python: {info.get('exe', '?')}\n"
+                f"Версия: {info.get('version', '?')} ({info.get('arch', '?')})\n"
+                f"PyInstaller: {'установлен' if info.get('has_pyinstaller') else 'НЕ установлен (будет авто-установка)'}"
+            )
+        else:
+            QMessageBox.warning(self, "Python не работает", info.get("error") or "Неизвестная ошибка")
+
+    def _on_probe_label(self, path, info):
+        # Ответ мог устареть — пользователь уже сменил путь/режим.
+        if self._current_python_mode() != "custom" or self.python_exe_edit.text().strip() != path:
+            return
+        if info.get("ok"):
+            pi_txt = "PyInstaller: ✓" if info.get("has_pyinstaller") else "PyInstaller: ✗ (поставится авто)"
+            self.python_info_lbl.setText(f"📁 {info['version']} ({info['arch']})  •  {pi_txt}")
+        else:
+            self.python_info_lbl.setText(f"❌ Python не работает: {info.get('error')}")
+
     def _refresh_python_info(self):
         mode = self._current_python_mode()
         spec = PORTABLE_PYTHONS.get(mode, {})
@@ -5587,12 +5973,12 @@ class ExeBuilderWindow(QMainWindow):
             if not path:
                 self.python_info_lbl.setText("📁 Укажи путь к python.exe")
                 return
-            info = detect_python_info(path)
-            if info["ok"]:
-                pi_txt = "PyInstaller: ✓" if info["has_pyinstaller"] else "PyInstaller: ✗ (поставится авто)"
-                self.python_info_lbl.setText(f"📁 {info['version']} ({info['arch']})  •  {pi_txt}")
-            else:
-                self.python_info_lbl.setText(f"❌ Python не работает: {info['error']}")
+            if self._restoring:
+                # Не запускаем exe из настроек автоматически при старте.
+                self.python_info_lbl.setText(f"📁 {path}  •  нажми «Проверить»")
+                return
+            self.python_info_lbl.setText("📁 Проверка python.exe...")
+            self._start_probe(path, self._on_probe_label)
             return
         version = spec.get("version", "")
         arch = self._current_build_arch()
@@ -5614,7 +6000,11 @@ class ExeBuilderWindow(QMainWindow):
                 break
         if saved_path:
             self.python_exe_edit.setText(saved_path)
-        self._on_target_os_changed()
+        self._restoring = True
+        try:
+            self._on_target_os_changed()
+        finally:
+            self._restoring = False
 
     def _choose_ffmpeg(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -5651,6 +6041,7 @@ class ExeBuilderWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
 
+        self._stop_requested = False
         self.set_busy(True)
         self.set_status("Скачивание ffmpeg...")
         self.download_ffmpeg_btn.setEnabled(False)
@@ -5683,6 +6074,9 @@ class ExeBuilderWindow(QMainWindow):
         self.set_busy(False)
         self.download_ffmpeg_btn.setEnabled(True)
         self.download_ffmpeg_btn.setText("⬇ Скачать ffmpeg")
+        if self._stop_requested:
+            self.set_status("Скачивание остановлено")
+            return
         self.set_status("Ошибка скачивания ffmpeg")
         QMessageBox.critical(
             self, "Не удалось скачать ffmpeg",
@@ -5723,13 +6117,16 @@ class ExeBuilderWindow(QMainWindow):
 
     def open_output_dir(self):
         folder = self._current_output_dir()
-        folder.mkdir(parents=True, exist_ok=True)
-        if sys.platform.startswith("win"):
-            os.startfile(folder)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(folder)])
-        else:
-            subprocess.Popen(["xdg-open", str(folder)])
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if sys.platform.startswith("win"):
+                os.startfile(folder)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except Exception as exc:
+            QMessageBox.warning(self, "Папка EXE", f"Не удалось открыть папку:\n{folder}\n\n{exc}")
 
     # ---------- helpers ----------
     def _current_project_or_app_dir(self):
@@ -5768,7 +6165,6 @@ class ExeBuilderWindow(QMainWindow):
         prev = self.copy_log_btn.text()
         self.copy_log_btn.setText("Скопировано ✓")
         # Возврат текста через короткую задержку.
-        from PySide6.QtCore import QTimer
         QTimer.singleShot(1200, lambda: self.copy_log_btn.setText(prev))
         self.set_status(f"Лог скопирован в буфер ({len(text)} символов)")
 
@@ -5780,7 +6176,6 @@ class ExeBuilderWindow(QMainWindow):
 
     def write_log(self, text=""):
         """Лог с подсветкой: ошибки — красным, предупреждения — жёлтым, успех — зелёным."""
-        from html import escape
         text = str(text)
         color = ""
         for keys, col in self._LOG_COLORS:
@@ -5790,7 +6185,7 @@ class ExeBuilderWindow(QMainWindow):
         style = "white-space:pre-wrap;"
         if color:
             style += f"color:{color};"
-        self.log_view.appendHtml(f'<span style="{style}">{escape(text) or "&nbsp;"}</span>')
+        self.log_view.appendHtml(f'<span style="{style}">{html_escape(text) or "&nbsp;"}</span>')
 
     def set_status(self, text):
         self.status_label.setText(text)
@@ -5805,6 +6200,8 @@ class ExeBuilderWindow(QMainWindow):
         self.convert_btn.setEnabled(not busy)
         self.convert_btn.setText(self.CONVERT_BTN_BUSY if busy else self.CONVERT_BTN_IDLE)
         self.progress_bar.setVisible(busy)
+        self.stop_btn.setVisible(busy)
+        self.stop_btn.setEnabled(busy)
 
     def _set_worker(self, w):
         """Назначает нового воркера, удерживая ссылку на предыдущего до
@@ -5923,12 +6320,21 @@ class ExeBuilderWindow(QMainWindow):
             QMessageBox.warning(self, "Нет папки проекта", "Выбери папку проекта.")
             return None
 
+        icon_text = self.icon_edit.text().strip()
+        if icon_text and (not Path(icon_text).is_file() or Path(icon_text).suffix.lower() != ".ico"):
+            QMessageBox.warning(self, "Иконка", f"Своя иконка должна быть существующим .ico файлом:\n{icon_text}")
+            return None
+
         self.output_dir_edit.setText(str(output_dir))
         app_name = self.app_name_edit.text().strip()
         if not app_name:
             app_name = main_file.stem
             self.app_name_edit.setText(app_name)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Папка EXE", f"Не удалось создать папку:\n{output_dir}\n\n{exc}")
+            return None
         return main_file, project_dir, output_dir, app_name
 
     # ---------- actions: analyze ----------
@@ -5940,6 +6346,7 @@ class ExeBuilderWindow(QMainWindow):
             return
         main_file, project_dir, output_dir, _ = data
 
+        self._stop_requested = False
         self.set_busy(True)
         self.set_status("Анализ...")
         w = AnalyzeWorker(main_file, project_dir, output_dir)
@@ -5978,8 +6385,10 @@ class ExeBuilderWindow(QMainWindow):
                 )
                 return
 
-        # Новая сборка — сбрасываем запомненный отказ от ffmpeg.
+        # Новая сборка — сбрасываем запомненный отказ от ffmpeg и флаг «Стоп».
         self._ffmpeg_declined = False
+        self._stop_requested = False
+        self._upx_ready_dir = None
 
         # Сначала анализ, потом сборка — двумя последовательными воркерами.
         self.set_busy(True)
@@ -5992,6 +6401,10 @@ class ExeBuilderWindow(QMainWindow):
         pre.start()
 
     def _after_pre_analyze(self, result, main_file, project_dir, output_dir, app_name):
+        if self._stop_requested:
+            self.set_busy(False)
+            self.set_status("Сборка остановлена")
+            return
         self.third_party_imports = result["third"]
         self.unknown_imports = result["unknown"]
         qt_used = result.get("qt_used") or {}
@@ -6059,7 +6472,10 @@ class ExeBuilderWindow(QMainWindow):
         # --- Авто-скачивание UPX если включено сжатие ---
         if self.upx_chk.isChecked():
             workspace_dir = project_workspace_dir(project_dir)
-            upx_dir = find_upx(workspace_dir)
+            upx_dir = find_upx(workspace_dir) or self._upx_ready_dir
+            if not upx_dir and not sys.platform.startswith("win"):
+                self.write_log("⚠ UPX не найден, а авто-скачивание есть только для Windows — без UPX.")
+                upx_dir = "-"
             if not upx_dir:
                 self.write_log("")
                 self.write_log("🗜 UPX-сжатие включено, но UPX не найден. Скачиваю...")
@@ -6079,8 +6495,37 @@ class ExeBuilderWindow(QMainWindow):
             else:
                 self.write_log(f"🗜 UPX найден: {upx_dir}")
 
+        # --- Подтверждение списка pip-пакетов (защита от typosquatting) ---
+        mode = self._current_python_mode()
+        install_names = []
+        if mode != "current" or getattr(sys, "frozen", False):
+            local = set(result.get("local") or [])
+            cand = sorted({n for n in (list(self.third_party_imports) + list(self.unknown_imports))
+                           if is_installable_dep(n) and n not in local})
+            if cand:
+                shown = [f"{n} → {import_to_pip_name(n)}" if import_to_pip_name(n) != n else n for n in cand]
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Question)
+                box.setWindowTitle("Установка пакетов через pip")
+                box.setText(
+                    "В выбранный Python будут установлены (только отсутствующие) пакеты с PyPI:\n\n"
+                    + ", ".join(shown)
+                    + "\n\nПроверь, что имена верные (опечатка = чужой пакет с PyPI).\n"
+                    "«Да» — ставить, «Нет» — собирать без установки, «Отмена» — прервать."
+                )
+                box.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+                box.setDefaultButton(QMessageBox.Yes)
+                ans = box.exec()
+                if ans == QMessageBox.Cancel:
+                    self.set_busy(False)
+                    self.set_status("Сборка отменена")
+                    return
+                if ans == QMessageBox.Yes:
+                    install_names = cand
+
         self.set_status("Сборка EXE...")
         params = {
+            "install_names": install_names,
             "main_file": main_file,
             "project_dir": project_dir,
             "output_dir": output_dir,
@@ -6110,6 +6555,7 @@ class ExeBuilderWindow(QMainWindow):
         }
         w = ConvertWorker(params)
         w.log.connect(self.write_log)
+        w.stage.connect(self.set_status)
         w.done.connect(self._on_convert_done)
         w.failed.connect(self._on_worker_failed)
         self._set_worker(w)
@@ -6120,12 +6566,16 @@ class ExeBuilderWindow(QMainWindow):
         self.bundle_ffmpeg_chk.setChecked(True)
         self.write_log(f"✓ ffmpeg готов: {folder}. Продолжаю сборку...")
         # Повторяем сборку с уже скачанным ffmpeg
-        if hasattr(self, "_pending_convert"):
-            args = self._pending_convert
-            del self._pending_convert
+        args, self._pending_convert = self._pending_convert, None
+        if args:
             self._after_pre_analyze(*args)
 
     def _on_ffmpeg_pre_failed(self, text):
+        if self._stop_requested:
+            self._pending_convert = None
+            self.set_busy(False)
+            self.set_status("Сборка остановлена")
+            return
         self.write_log(f"❌ Не удалось скачать ffmpeg: {text}")
         QMessageBox.critical(
             self, "Не удалось скачать ffmpeg",
@@ -6136,14 +6586,13 @@ class ExeBuilderWindow(QMainWindow):
         )
         self.set_busy(False)
         self.set_status("Сборка прервана")
-        if hasattr(self, "_pending_convert"):
-            del self._pending_convert
+        self._pending_convert = None
 
     def _on_upx_pre_done(self, folder):
+        self._upx_ready_dir = folder  # не ищем повторно (иначе цикл скачивания)
         self.write_log(f"✓ UPX готов: {folder}. Продолжаю сборку...")
-        if hasattr(self, "_pending_convert"):
-            args = self._pending_convert
-            del self._pending_convert
+        args, self._pending_convert = self._pending_convert, None
+        if args:
             self._after_pre_analyze(*args)
 
     def _on_upx_pre_failed(self, text):
@@ -6151,9 +6600,8 @@ class ExeBuilderWindow(QMainWindow):
         self.write_log(f"⚠ Не удалось скачать UPX: {text}")
         self.write_log("Продолжаю сборку без UPX-сжатия.")
         self.upx_chk.setChecked(False)
-        if hasattr(self, "_pending_convert"):
-            args = self._pending_convert
-            del self._pending_convert
+        args, self._pending_convert = self._pending_convert, None
+        if args:
             self._after_pre_analyze(*args)
 
     def _reveal_exe(self, exe_path):
@@ -6162,7 +6610,8 @@ class ExeBuilderWindow(QMainWindow):
         try:
             if sys.platform.startswith("win"):
                 # /select, — открыть проводник с выделенным файлом.
-                subprocess.Popen(["explorer", "/select,", str(p)])
+                # Одной строкой: путь с запятыми/пробелами в кавычках.
+                subprocess.Popen(f'explorer /select,"{p}"')
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", "-R", str(p)])
             else:
@@ -6173,8 +6622,12 @@ class ExeBuilderWindow(QMainWindow):
 
     def _on_convert_done(self, code, exe_path):
         self.set_busy(False)
-        self.set_status("Готово")
         self.write_log("")
+        if code == -2 or self._stop_requested:
+            self.set_status("Сборка остановлена")
+            self.write_log("⏹ Сборка остановлена пользователем.")
+            return
+        self.set_status("Готово")
         if code == 0:
             if exe_path:
                 self.write_log(f"Готово: {exe_path}")
@@ -6187,7 +6640,51 @@ class ExeBuilderWindow(QMainWindow):
             self.write_log(f"Ошибка сборки. Код: {code}")
             QMessageBox.critical(self, "Ошибка", "Сборка не завершилась. Проверь лог.")
 
+    def _active_threads(self):
+        ws = [self.worker, self._ffmpeg_worker, self._ffmpeg_worker_pre, self._upx_worker_pre,
+              *self._retired_workers, *self._probe_workers]
+        return [w for w in ws if w is not None and w.isRunning()]
+
+    def stop_build(self):
+        """Кнопка «Стоп»: отменяет текущую сборку/скачивание."""
+        self._stop_requested = True
+        self.stop_btn.setEnabled(False)
+        self.set_status("Остановка...")
+        self.write_log("⏹ Остановка...")
+        for w in self._active_threads():
+            cancel = getattr(w, "cancel", None)
+            if cancel:
+                cancel()
+        if not self._active_threads():
+            self.set_busy(False)
+            self.set_status("Сборка остановлена")
+
+    def closeEvent(self, event):
+        """Закрытие во время работы: спросить, убить процессы, дождаться потоков."""
+        if self._active_threads():
+            ans = QMessageBox.question(
+                self, "Идёт работа",
+                "Идёт сборка или скачивание. Остановить и закрыть?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if ans != QMessageBox.Yes:
+                event.ignore()
+                return
+            self._stop_requested = True
+            for w in self._active_threads():
+                cancel = getattr(w, "cancel", None)
+                if cancel:
+                    cancel()
+            for w in self._active_threads():
+                w.wait(10000)
+        event.accept()
+
     def _on_worker_failed(self, text):
+        if self._stop_requested:
+            self.set_busy(False)
+            self.set_status("Сборка остановлена")
+            self.write_log(f"⏹ Остановлено: {text}")
+            return
         self.set_busy(False)
         self.set_status("Ошибка")
         self.write_log(f"Ошибка: {text}")
