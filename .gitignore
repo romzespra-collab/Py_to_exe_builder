@@ -1,1 +1,8 @@
 __pycache__/
+build/
+dist/
+*.log
+selftest.txt
+config.json
+*.zip
+!release/*.zip

@@ -1,7 +1,26 @@
 # -*- coding: utf-8 -*-
 """
+py_to_exe_builder.pyw  v0.8.3
 Py To EXE Builder
-Версия: 0.8.2  (PySide6 / Qt6)
+Версия: 0.8.3  (PySide6 / Qt6)
+
+Изменения 0.8.3:
+- 📦 Авто-установка библиотек: при запуске .pyw недостающий PySide6 ставится
+  сам (окно с ходом pip; ensurepip; повтор с --user; при неудаче — окно
+  с командой для ручной установки).
+- 🧪 Режим --selftest: проверка зависимостей, окна и ядра → консоль
+  и selftest.txt, код возврата 0/1 (используется в build_exe.bat).
+- 🪟 Своя рамка окна: тёмная/светлая полоса заголовка с иконкой, версией
+  и кнопками — □ ✕, перетаскивание, двойной клик, Win+↑, ресайз за края.
+- 🧭 Шапка: иконка, версия, чип статуса (готов / сборка… / ошибка),
+  плитки-счётчики (импортов, сторонних, неизвестных, размер EXE),
+  переключатель темы ☀/☾ и меню ⋯ (О программе, папка workspace,
+  стиль оформления, сброс настроек).
+- 🎨 Своя иконка приложения (рисуется QPainter 16…256 px) в окне и таскбаре.
+- 🌓 Диалоги (QMessageBox, выбор файлов — Qt-диалог, окно иконок) теперь
+  в цветах темы; в Windows заголовки диалогов тоже тёмные (DWM).
+- 💾 Все поля и опции запоминаются сами (при изменении и при закрытии).
+- 📄 Файлы проекта: build_exe.bat, .spec, requirements.txt, README.txt.
 
 Изменения 0.8.2 (по итогам код-аудита):
 - 🛑 Кнопка «Стоп» и корректное закрытие окна во время сборки/скачивания
@@ -299,11 +318,13 @@ Py To EXE Builder
 Автор: RomzesPRA-2026.
 """
 
-APP_VERSION = "0.8.2"
+APP_VERSION = "0.8.3"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
+APP_USER_MODEL_ID = "PyToExeBuilder.App"
 
 import ast
+import importlib
 import importlib.metadata
 import importlib.util
 import json
@@ -323,18 +344,141 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QSettings, QSize, QRect, QPoint, QTimer
+# Папка программы: рядом с EXE (frozen) или рядом с этим файлом.
+APP_ROOT = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+            else Path(__file__).resolve().parent)
+
+
+# ---------------- Авто-установка библиотек (ДО импорта PySide6) ----------------
+# (имя для import, имя для pip)
+REQUIRED = (("PySide6", "PySide6>=6.5"),)
+
+
+def _console_python():
+    """python.exe рядом с pythonw.exe (под pythonw консоли нет — pip не видно)."""
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        cand = exe.with_name("python.exe")
+        if cand.exists():
+            return str(cand)
+    return str(exe)
+
+
+def pip_install(pips, console=True):
+    """Ставит пакеты через pip. console=True — отдельное окно с ходом установки
+    (CREATE_NEW_CONSOLE), иначе — молча. Возвращает True при успехе."""
+    py = _console_python()
+    kw, quiet = {}, {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if sys.platform == "win32":
+        kw["creationflags"] = 0x00000010 if console else 0x08000000  # NEW_CONSOLE / NO_WINDOW
+        quiet["creationflags"] = 0x08000000  # проверка pip — без окна
+
+    def run(args, **extra):
+        try:
+            return subprocess.call(args, **(extra or kw)) == 0
+        except Exception:
+            return False
+
+    # Нет pip (урезанный Python) — поднимаем его через ensurepip.
+    if not run([py, "-m", "pip", "--version"], **quiet):
+        run([py, "-m", "ensurepip", "--upgrade"])
+    base = [py, "-m", "pip", "install", "--disable-pip-version-check"]
+    ok = run(base + list(pips)) or run(base + ["--user"] + list(pips))
+    # После --user папка user-site могла появиться только сейчас — добавим в sys.path.
+    try:
+        import site
+        user_site = site.getusersitepackages()
+        if user_site and os.path.isdir(user_site) and user_site not in sys.path:
+            sys.path.append(user_site)
+    except Exception:
+        pass
+    importlib.invalidate_caches()
+    return ok
+
+
+def _write_selftest_report(lines, ok):
+    """Итог --selftest: в консоль (если она есть) и в selftest.txt рядом с программой."""
+    text = "\n".join(lines + ["", "ИТОГ: " + ("OK" if ok else "ОШИБКА")]) + "\n"
+    try:
+        if sys.stdout is not None:
+            try:
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+            sys.stdout.write(text)
+            sys.stdout.flush()
+    except Exception:
+        pass
+    for folder in (APP_ROOT, Path(tempfile.gettempdir())):
+        try:
+            (folder / "selftest.txt").write_text(text, encoding="utf-8")
+            return folder / "selftest.txt"
+        except Exception:
+            continue
+    return None
+
+
+def _missing_packages():
+    return [pip for mod, pip in REQUIRED if importlib.util.find_spec(mod) is None]
+
+
+def ensure_packages():
+    """Сама ставит недостающие библиотеки. В EXE и при --selftest — пропуск."""
+    if getattr(sys, "frozen", False):
+        return
+    missing = _missing_packages()
+    if not missing:
+        return
+    if "--selftest" in sys.argv:
+        # Самопроверка ничего не ставит — просто честно падает с понятной причиной.
+        _write_selftest_report([f"✗ нет библиотек: {', '.join(missing)}"], False)
+        sys.exit(1)
+    pip_install(missing, console=True)
+    still = _missing_packages()
+    if not still:
+        return
+    msg = (
+        "Не удалось автоматически установить библиотеки:\n\n  "
+        + "\n  ".join(still)
+        + "\n\nУстанови вручную (в командной строке):\n\n  "
+        + f'"{_console_python()}" -m pip install ' + " ".join(f'"{p}"' for p in still)
+    )
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, msg, f"{APP_NAME} v{APP_VERSION}", 0x10)
+        except Exception:
+            pass
+    try:
+        print(msg, file=sys.stderr)
+    except Exception:
+        pass
+    sys.exit(1)
+
+
+ensure_packages()
+
+from PySide6.QtCore import (
+    Qt, QThread, Signal, QSettings, QSize, QRect, QPoint, QTimer, QEvent, QObject, QRectF,
+    QPointF,
+)
 from PySide6.QtGui import (
     QPixmap, QPainter, QColor, QLinearGradient, QRadialGradient,
-    QFont, QBrush, QPalette, QAction, QActionGroup, QGuiApplication, QIcon,
+    QFont, QBrush, QPalette, QAction, QActionGroup, QGuiApplication, QIcon, QPen,
+    QPainterPath,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QFileDialog,
     QMessageBox, QGroupBox, QPlainTextEdit, QScrollArea, QFrame, QDialog,
-    QStyleFactory, QMenu, QToolButton, QProgressBar, QStyle, QLayout,
+    QStyleFactory, QMenu, QToolButton, QProgressBar, QStyle, QLayout, QSizePolicy,
+    QStyleOptionButton,
 )
 
+
+# Диалоги выбора файлов — Qt-шные (не системные), чтобы были в цветах темы.
+FILE_DLG_OPTS = QFileDialog.Option.DontUseNativeDialog
+DIR_DLG_OPTS = QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog
 
 STDLIB_PATH = Path(sysconfig.get_paths().get("stdlib", "")).resolve()
 SITE_PATHS = [Path(p).resolve() for p in sys.path if "site-packages" in p or "dist-packages" in p]
@@ -409,31 +553,148 @@ CUSTOM_PALETTES = {
 MODERN_DARK = "Modern Dark (карточки)"
 MODERN_LIGHT = "Modern Light (карточки)"
 
+CLOSE_RED = "#e81123"   # кнопка ✕ рамки при наведении (как в Windows)
+
 MODERN_THEMES = {
     MODERN_DARK: {
         "bg": "#15171c", "card": "#1d2027", "border": "#2a2e37", "input": "#12141a",
         "input_border": "#2f3440", "text": "#e6e8ec", "mute": "#8b93a1",
         "chip": "#252933", "chip_on_bg": "#1f3a2a", "chip_on_border": "#2f6b45",
         "chip_on_text": "#8fe0a8", "accent": "#5b7cfa", "accent2": "#8b5cf6",
-        "log": "#0f1115", "hover": "#2a2f3a",
+        "log": "#0f1115", "hover": "#2a2f3a", "title": "#111318",
+        "ok": "#3ecf8e", "err": "#ff5d6c", "warn": "#f5b545",
     },
     MODERN_LIGHT: {
         "bg": "#eef0f4", "card": "#ffffff", "border": "#dfe3ea", "input": "#f7f8fa",
         "input_border": "#d5dae3", "text": "#1c1f24", "mute": "#6b7280",
         "chip": "#f1f3f6", "chip_on_bg": "#e3f6ea", "chip_on_border": "#8fd3a8",
         "chip_on_text": "#17663a", "accent": "#4f6ef7", "accent2": "#7c4dff",
-        "log": "#fafbfc", "hover": "#e8ebf0",
+        "log": "#fafbfc", "hover": "#e8ebf0", "title": "#e4e7ed",
+        "ok": "#1f9d61", "err": "#d93c4a", "warn": "#b7791f",
     },
 }
 
 
+def _mix(a, b, t):
+    """Смесь двух цветов '#rrggbb' (t=0 → a, t=1 → b)."""
+    qa, qb = QColor(a), QColor(b)
+    return QColor(
+        round(qa.red() * (1 - t) + qb.red() * t),
+        round(qa.green() * (1 - t) + qb.green() * t),
+        round(qa.blue() * (1 - t) + qb.blue() * t),
+    ).name()
+
+
+def _rgba(color, alpha):
+    """'#rrggbb' + прозрачность 0..1 → 'rgba(r,g,b,a)' для QSS."""
+    q = QColor(color)
+    return f"rgba({q.red()},{q.green()},{q.blue()},{int(alpha * 255)})"
+
+
+def theme_is_dark(c):
+    return QColor(c["bg"]).lightness() < 128
+
+
+def derive_theme_colors(pal):
+    """Цвета «как у современной темы» из любой QPalette — для рамки окна,
+    шапки и DWM при системных стилях / цветовых палитрах."""
+    def col(role):
+        return pal.color(getattr(QPalette.ColorRole, role)).name()
+    win, base, txt = col("Window"), col("Base"), col("WindowText")
+    btn, hl = col("Button"), col("Highlight")
+    dark = QColor(win).lightness() < 128
+    if dark:
+        ok, err, warn = "#3ecf8e", "#ff5d6c", "#f5b545"
+        card, border = _mix(win, txt, 0.06), _mix(win, txt, 0.16)
+        in_border, hover = _mix(win, txt, 0.24), _mix(btn, txt, 0.12)
+        title, accent2 = _mix(win, "#000000", 0.25), _mix(hl, "#ffffff", 0.2)
+    else:
+        ok, err, warn = "#1f9d61", "#d93c4a", "#b7791f"
+        card, border = _mix(win, "#ffffff", 0.6), _mix(win, txt, 0.12)
+        in_border, hover = _mix(win, txt, 0.2), _mix(btn, txt, 0.08)
+        title, accent2 = _mix(win, txt, 0.06), _mix(hl, "#000000", 0.15)
+    return {
+        "bg": win, "card": card, "border": border, "input": base,
+        "input_border": in_border, "text": txt, "mute": _mix(txt, win, 0.42),
+        "chip": btn, "chip_on_bg": _mix(win, ok, 0.2), "chip_on_border": _mix(win, ok, 0.55),
+        "chip_on_text": ok, "accent": hl, "accent2": accent2,
+        "log": base, "hover": hover, "title": title,
+        "ok": ok, "err": err, "warn": warn,
+    }
+
+
+def dialogs_qss(c):
+    """Диалоги (QMessageBox, QFileDialog, QInputDialog, свои QDialog) — в цветах темы."""
+    return f"""
+QDialog, QMessageBox, QFileDialog, QInputDialog {{ background: {c['card']}; color: {c['text']}; }}
+QMessageBox QLabel, QInputDialog QLabel, QFileDialog QLabel, QDialog QLabel {{
+    color: {c['text']}; background: transparent; }}
+QDialog QPushButton, QMessageBox QPushButton, QFileDialog QPushButton, QInputDialog QPushButton {{
+    background: {c['chip']}; color: {c['text']}; border: 1px solid {c['input_border']};
+    border-radius: 8px; padding: 6px 14px; min-width: 80px; }}
+QDialog QPushButton:hover, QMessageBox QPushButton:hover {{ background: {c['hover']}; border-color: {c['accent']}; }}
+QDialog QPushButton:default, QMessageBox QPushButton:default {{ border-color: {c['accent']}; }}
+QDialog QPushButton:disabled {{ color: {c['mute']}; }}
+QFileDialog QToolButton {{ background: transparent; color: {c['text']}; border: 1px solid transparent;
+    border-radius: 6px; padding: 3px; }}
+QFileDialog QToolButton:hover {{ background: {c['hover']}; border-color: {c['input_border']}; }}
+QAbstractItemView {{ background: {c['input']}; color: {c['text']}; border: 1px solid {c['input_border']};
+    selection-background-color: {c['accent']}; selection-color: #ffffff;
+    alternate-background-color: {c['card']}; outline: 0; }}
+QAbstractItemView::item:hover {{ background: {c['hover']}; color: {c['text']}; }}
+QAbstractItemView::item:selected {{ background: {c['accent']}; color: #ffffff; }}
+QHeaderView {{ background: {c['card']}; color: {c['mute']}; border: none; }}
+QHeaderView::section {{ background: {c['chip']}; color: {c['mute']}; border: none;
+    border-right: 1px solid {c['border']}; border-bottom: 1px solid {c['border']}; padding: 4px 8px; }}
+QTextEdit, QTextBrowser, QSpinBox, QDoubleSpinBox {{ background: {c['input']}; color: {c['text']};
+    border: 1px solid {c['input_border']}; border-radius: 8px; selection-background-color: {c['accent']}; }}
+QDialog QScrollArea {{ background: transparent; border: none; }}
+QDialog QScrollArea > QWidget > QWidget {{ background: transparent; }}
+QFrame#iconCell {{ background: {c['chip']}; border: 1px solid {c['border']}; border-radius: 9px; }}
+QFrame#iconCell:hover {{ background: {c['hover']}; border-color: {c['accent']}; }}
+QFrame#stylePopup {{ background: {c['card']}; color: {c['text']}; border: 1px solid {c['accent']}; border-radius: 8px; }}
+QFrame#stylePopup QToolButton {{ background: {c['chip']}; border: 1px solid transparent; border-radius: 6px; }}
+QFrame#stylePopup QToolButton:hover {{ background: {c['hover']}; border-color: {c['accent']}; }}
+"""
+
+
+def chrome_qss(c):
+    """Своя рамка окна + шапка (всегда, при любом стиле оформления)."""
+    return f"""
+QScrollArea#contentScroll, QWidget#contentInner {{ background: transparent; border: none; }}
+QScrollArea#contentScroll > QWidget#qt_scrollarea_viewport {{ background: transparent; }}
+QFrame#titleBar {{ background: {c['title']}; border: none; border-bottom: 1px solid {c['border']}; }}
+QLabel#titleText {{ color: {c['mute']}; background: transparent; }}
+QPushButton#winBtn, QPushButton#winClose {{ background: transparent; border: none; border-radius: 0;
+    padding: 0; margin: 0; min-width: 0; }}
+QPushButton#winBtn:hover {{ background: {c['hover']}; }}
+QPushButton#winBtn:pressed {{ background: {c['border']}; }}
+QPushButton#winClose:hover {{ background: {c['close']}; }}
+QPushButton#winClose:pressed {{ background: {_mix(c['close'], '#000000', 0.2)}; }}
+QFrame#headerBar {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 12px; }}
+QLabel#appTitle {{ color: {c['text']}; background: transparent; }}
+QLabel#versionBadge {{ background: {c['chip']}; color: {c['mute']}; border-radius: 6px; padding: 1px 7px; }}
+QLabel#statusLabel {{ color: {c['mute']}; background: transparent; }}
+QLabel#statChip {{ border-radius: 10px; padding: 2px 9px; font-weight: 600; }}
+QLabel#statChip[state="ok"] {{ color: {c['ok']}; background: {_rgba(c['ok'], 0.14)}; }}
+QLabel#statChip[state="busy"] {{ color: {c['warn']}; background: {_rgba(c['warn'], 0.14)}; }}
+QLabel#statChip[state="err"] {{ color: {c['err']}; background: {_rgba(c['err'], 0.14)}; }}
+QFrame#statTile {{ background: {c['chip']}; border: 1px solid {c['border']}; border-radius: 9px; }}
+QLabel#tileValue {{ color: {c['text']}; background: transparent; }}
+QLabel#tileLabel {{ color: {c['mute']}; background: transparent; }}
+QToolButton#hdrBtn {{ background: {c['chip']}; color: {c['text']}; border: 1px solid {c['input_border']};
+    border-radius: 8px; padding: 0; }}
+QToolButton#hdrBtn:hover {{ background: {c['hover']}; border-color: {c['accent']}; }}
+QToolButton#hdrBtn::menu-indicator {{ image: none; width: 0; }}
+"""
+
+
 def modern_qss(c):
     return f"""
-QMainWindow, QDialog, QWidget#centralRoot {{ background: {c['bg']}; color: {c['text']}; }}
-QToolTip {{ background: {c['card']}; color: {c['text']}; border: 1px solid {c['border']}; padding: 4px; }}
+QMainWindow, QWidget#centralRoot {{ background: {c['bg']}; color: {c['text']}; }}
+QToolTip {{ background: {c['card']}; color: {c['text']}; border: 1px solid {c['accent']}; padding: 4px; }}
 QLabel {{ color: {c['text']}; background: transparent; }}
-QLabel#versionBadge {{ background: {c['chip']}; color: {c['mute']}; border-radius: 6px; padding: 1px 7px; }}
-QLabel#statusLabel, QLabel#fieldLabel, QLabel#dropSub {{ color: {c['mute']}; }}
+QLabel#fieldLabel, QLabel#dropSub {{ color: {c['mute']}; }}
 QLabel#caption {{ color: {c['mute']}; font-size: 8pt; font-weight: 600; letter-spacing: 1px; }}
 QFrame#card {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 12px; }}
 QFrame#dropZone {{ background: transparent; border: 2px dashed {c['input_border']}; border-radius: 12px; }}
@@ -445,11 +706,13 @@ QLabel#iconPreview {{ background: {c['chip']}; border-radius: 10px; }}
 QLineEdit, QComboBox, QPlainTextEdit {{
     background: {c['input']}; color: {c['text']}; border: 1px solid {c['input_border']};
     border-radius: 8px; padding: 5px 8px; selection-background-color: {c['accent']};
+    selection-color: #ffffff;
 }}
 QLineEdit:focus, QComboBox:focus {{ border-color: {c['accent']}; }}
+QLineEdit:disabled, QComboBox:disabled {{ color: {c['mute']}; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
 QComboBox QAbstractItemView {{ background: {c['card']}; color: {c['text']}; border: 1px solid {c['border']};
-    selection-background-color: {c['accent']}; }}
+    selection-background-color: {c['accent']}; selection-color: #ffffff; }}
 QPlainTextEdit#logView {{ background: {c['log']}; border-color: {c['border']}; }}
 QPushButton {{ background: {c['chip']}; color: {c['text']}; border: 1px solid {c['input_border']};
     border-radius: 8px; padding: 6px 12px; }}
@@ -463,17 +726,16 @@ QPushButton#ghostBtn {{ background: transparent; border-radius: 12px; padding: 0
 QPushButton#ghostBtn:hover, QPushButton#ghostBtn:checked {{ background: {c['hover']}; }}
 QPushButton#linkBtn {{ background: transparent; border: none; color: {c['mute']}; padding: 2px 6px; }}
 QPushButton#linkBtn:hover {{ color: {c['text']}; }}
-QToolButton#flatBtn, QToolButton#gearBtn {{ background: transparent; border: none; color: {c['mute']}; border-radius: 6px; }}
-QToolButton#flatBtn:hover, QToolButton#gearBtn:hover {{ background: {c['hover']}; color: {c['text']}; }}
-QToolButton#gearBtn::menu-indicator {{ image: none; width: 0; }}
+QToolButton#flatBtn {{ background: transparent; border: none; color: {c['mute']}; border-radius: 6px; }}
+QToolButton#flatBtn:hover {{ background: {c['hover']}; color: {c['text']}; }}
 QToolButton#iconTile {{ background: {c['chip']}; border: 1px solid transparent; border-radius: 8px; color: {c['text']}; }}
 QToolButton#iconTile:hover {{ background: {c['hover']}; }}
 QToolButton#iconTile:checked {{ border: 2px solid {c['accent']}; }}
 QCheckBox {{ color: {c['text']}; spacing: 6px; }}
-QCheckBox#chip {{ background: {c['chip']}; border: 1px solid {c['input_border']}; border-radius: 13px; padding: 4px 11px; }}
+QCheckBox#chip {{ background: {c['chip']}; border: 1px solid {c['input_border']}; border-radius: 11px; padding: 4px 11px; }}
 QCheckBox#chip:hover {{ background: {c['hover']}; }}
 QCheckBox#chip:checked {{ background: {c['chip_on_bg']}; border-color: {c['chip_on_border']}; color: {c['chip_on_text']}; }}
-QCheckBox#chip::indicator {{ width: 0; height: 0; }}
+QCheckBox#chip::indicator {{ width: 0; height: 0; border: none; background: transparent; image: none; margin: 0; }}
 QGroupBox {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 12px; margin-top: 14px; padding: 12px 10px 8px 10px; color: {c['text']}; }}
 QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 4px; color: {c['mute']}; }}
 QProgressBar#buildProgress {{ background: {c['chip']}; border: none; border-radius: 2px; }}
@@ -482,49 +744,61 @@ QProgressBar#buildProgress::chunk {{ border-radius: 2px;
 QMenu {{ background: {c['card']}; color: {c['text']}; border: 1px solid {c['border']}; padding: 4px; }}
 QMenu::item {{ padding: 5px 18px; border-radius: 5px; }}
 QMenu::item:selected {{ background: {c['accent']}; color: #ffffff; }}
+QMenu::item:disabled {{ color: {c['mute']}; }}
+QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 6px; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: {c['input_border']}; border-radius: 4px; min-height: 24px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background: {c['input_border']}; border-radius: 4px; min-width: 24px; }}
 """
 
 
 def _modern_palette(c):
+    """QPalette из цветов темы: и Qt-диалоги, и всё, что не покрыто QSS,
+    получают правильные цвета (никаких белых окон в тёмной теме)."""
     pal = QPalette()
     for role, key in (("Window", "bg"), ("WindowText", "text"), ("Base", "input"),
                       ("AlternateBase", "card"), ("Text", "text"), ("Button", "chip"),
                       ("ButtonText", "text"), ("ToolTipBase", "card"), ("ToolTipText", "text"),
-                      ("PlaceholderText", "mute"), ("Highlight", "accent")):
+                      ("PlaceholderText", "mute"), ("Highlight", "accent"), ("Link", "accent"),
+                      ("BrightText", "err"), ("Mid", "border"), ("Dark", "input_border"),
+                      ("Midlight", "hover"), ("Light", "hover")):
         pal.setColor(getattr(QPalette.ColorRole, role), QColor(c[key]))
     pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    pal.setColor(QPalette.ColorRole.Shadow, QColor(_mix(c["bg"], "#000000", 0.5)))
+    muted = QColor(c["mute"])
+    for role in ("WindowText", "Text", "ButtonText", "PlaceholderText", "HighlightedText",
+                 "ToolTipText", "BrightText", "Link"):
+        pal.setColor(QPalette.ColorGroup.Disabled, getattr(QPalette.ColorRole, role), muted)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Highlight, QColor(c["border"]))
     return pal
 
 
 def apply_style(app, style_name, default_style_name, default_palette):
-    """Применить выбранный стиль ко всему приложению."""
-    # QSS современной темы снимаем при любом другом выборе.
+    """Применить выбранный стиль ко всему приложению: стиль Qt, палитру и QSS.
+    Возвращает словарь цветов темы (для рамки окна, шапки и DWM)."""
+    # QSS снимаем перед сменой стиля — иначе старые цвета «залипают».
     app.setStyleSheet("")
     if style_name in MODERN_THEMES:
         if "Fusion" in QStyleFactory.keys():
             app.setStyle("Fusion")
-        c = MODERN_THEMES[style_name]
+        c = dict(MODERN_THEMES[style_name])
+        c.setdefault("close", CLOSE_RED)
         app.setPalette(_modern_palette(c))
-        app.setStyleSheet(modern_qss(c))
-        return
+        app.setStyleSheet(modern_qss(c) + dialogs_qss(c) + chrome_qss(c))
+        return c
 
     if style_name == SYSTEM_DEFAULT:
         if default_style_name:
             app.setStyle(default_style_name)
-        app.setPalette(default_palette)
-        return
-
-    if style_name in QStyleFactory.keys():
+        if default_palette is not None:
+            app.setPalette(default_palette)
+    elif style_name in QStyleFactory.keys():
         app.setStyle(style_name)
         app.setPalette(app.style().standardPalette())
-        return
-
-    if style_name in CUSTOM_PALETTES:
+    elif style_name in CUSTOM_PALETTES:
         if "Fusion" in QStyleFactory.keys():
             app.setStyle("Fusion")
         spec = CUSTOM_PALETTES[style_name]
@@ -541,13 +815,21 @@ def apply_style(app, style_name, default_style_name, default_palette):
         pal.setColor(QPalette.ColorRole.Mid,      base.darker(115))
         pal.setColor(QPalette.ColorRole.Dark,     base.darker(150))
         pal.setColor(QPalette.ColorRole.Shadow,   base.darker(200))
+        muted = pal.color(QPalette.ColorRole.PlaceholderText)
+        for role in ("WindowText", "Text", "ButtonText"):
+            pal.setColor(QPalette.ColorGroup.Disabled, getattr(QPalette.ColorRole, role), muted)
         app.setPalette(pal)
+    c = derive_theme_colors(app.palette())
+    c["close"] = CLOSE_RED
+    # Цветовые палитры (Fusion) — диалоги тоже по QSS; системные стили Qt
+    # оставляем родными, своя только рамка окна и шапка.
+    extra = dialogs_qss(c) if style_name in CUSTOM_PALETTES else ""
+    app.setStyleSheet(extra + chrome_qss(c))
+    return c
 
 
 def app_base_dir():
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
+    return APP_ROOT
 
 
 def project_output_dir(project_dir):
@@ -4985,6 +5267,7 @@ class IconPickerDialog(QDialog):
         for glyph, variants in self._glyph_groups.items():
             rep = variants[0]  # представитель группы
             cell = QFrame()
+            cell.setObjectName("iconCell")
             cell.setFrameShape(QFrame.StyledPanel)
             cell.setCursor(Qt.PointingHandCursor)
             if len(variants) > 1:
@@ -5030,6 +5313,7 @@ class IconPickerDialog(QDialog):
         if not variants:
             return
         popup = QFrame(self, Qt.Popup)
+        popup.setObjectName("stylePopup")
         popup.setFrameShape(QFrame.StyledPanel)
         lay = QGridLayout(popup)
         lay.setContentsMargins(10, 8, 10, 10)
@@ -5109,6 +5393,397 @@ class IconPickerDialog(QDialog):
             else f"Найдено: {shown} из {total}"
         )
 
+
+
+# ----------------------- Иконка приложения (0.8.3) -----------------------
+# Фирменные цвета иконки — не зависят от темы (иконка одна и в таскбаре, и в окне).
+APP_ICON_C1, APP_ICON_C2 = "#5b7cfa", "#8b5cf6"
+APP_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
+
+
+def paint_app_icon(p, s):
+    """Рисует иконку в квадрате s×s: градиентная «плитка», белое окно EXE
+    и жёлтая стрелка Python → EXE."""
+    p.setRenderHint(QPainter.Antialiasing, True)
+    m = max(0.5, s * 0.03)
+    body = QRectF(m, m, s - 2 * m, s - 2 * m)
+    g = QLinearGradient(body.topLeft(), body.bottomRight())
+    g.setColorAt(0.0, QColor(APP_ICON_C1))
+    g.setColorAt(1.0, QColor(APP_ICON_C2))
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(g))
+    p.drawRoundedRect(body, s * 0.22, s * 0.22)
+
+    # Окно EXE: белое тело + тёмная полоса заголовка.
+    win = QRectF(s * 0.36, s * 0.22, s * 0.50, s * 0.56)
+    p.setBrush(QColor("#ffffff"))
+    p.drawRoundedRect(win, s * 0.07, s * 0.07)
+    strip = QPainterPath()
+    strip.addRoundedRect(win, s * 0.07, s * 0.07)
+    clip = QPainterPath()
+    clip.addRect(QRectF(win.left(), win.top(), win.width(), win.height() * 0.24))
+    p.setBrush(QColor("#25306b"))
+    p.drawPath(strip.intersected(clip))
+    if s >= 32:  # «строчки» внутри окна — только на крупных размерах
+        p.setBrush(QColor("#c9d2f5"))
+        lh = max(1.0, s * 0.035)
+        for i, frac in enumerate((0.62, 0.45)):
+            y = win.top() + win.height() * (0.42 + i * 0.17)
+            p.drawRoundedRect(QRectF(win.left() + win.width() * 0.38, y,
+                                     win.width() * frac * 0.85, lh), lh / 2, lh / 2)
+
+    # Стрелка Python → EXE (жёлтая, с тёмной обводкой).
+    cy = s * 0.60
+    arrow = QPainterPath()
+    pts = [(0.12, cy - s * 0.065), (0.38, cy - s * 0.065), (0.38, cy - s * 0.16),
+           (0.62, cy), (0.38, cy + s * 0.16), (0.38, cy + s * 0.065), (0.12, cy + s * 0.065)]
+    arrow.moveTo(QPointF(s * pts[0][0], pts[0][1]))
+    for x, y in pts[1:]:
+        arrow.lineTo(QPointF(s * x, y))
+    arrow.closeSubpath()
+    pen = QPen(QColor("#25306b"))
+    pen.setWidthF(max(1.0, s * 0.035))
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(QColor("#ffd43b"))
+    p.drawPath(arrow)
+
+
+class AppIconWidget(QWidget):
+    """Иконка приложения, нарисованная прямо в виджете — чёткая при любом масштабе."""
+
+    def __init__(self, size=40, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        paint_app_icon(p, min(self.width(), self.height()))
+        p.end()
+
+
+def app_icon_pixmap(size, dpr=1.0):
+    px = max(1, int(round(size * dpr)))
+    pm = QPixmap(px, px)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    paint_app_icon(p, px)
+    p.end()
+    pm.setDevicePixelRatio(dpr)
+    return pm
+
+
+def make_app_icon():
+    """QIcon приложения: каждый размер 16…256 нарисован отдельно (чётко везде)."""
+    icon = QIcon()
+    for s in APP_ICON_SIZES:
+        icon.addPixmap(app_icon_pixmap(s))
+    return icon
+
+
+# ----------------------- Windows: таскбар и DWM-заголовки -----------------------
+def set_app_user_model_id():
+    """Своя группа в таскбаре Windows (иначе иконка — от python.exe)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
+def _colorref(hex_color):
+    q = QColor(hex_color)
+    return q.red() | (q.green() << 8) | (q.blue() << 16)
+
+
+def dwm_style_window(widget, c):
+    """Системный заголовок окна (диалоги) — в цветах темы. Windows 10/11."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = wintypes.HWND(int(widget.winId()))
+        dwm = ctypes.windll.dwmapi
+        dark = ctypes.c_int(1 if theme_is_dark(c) else 0)
+        # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 20H1+), 19 — старые сборки Win10.
+        if dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark)) != 0:
+            dwm.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(dark), ctypes.sizeof(dark))
+        # 35 = DWMWA_CAPTION_COLOR, 36 = DWMWA_TEXT_COLOR (только Win11, на Win10 — без эффекта).
+        for attr, key in ((35, "card"), (36, "text")):
+            val = ctypes.c_uint(_colorref(c[key]))
+            dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
+        user32 = ctypes.windll.user32
+        if user32.IsWindowVisible(hwnd):
+            # Уже показано — перерисовать рамку: SWP_NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED.
+            user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+    except Exception:
+        pass
+
+
+class DwmThemer(QObject):
+    """Фильтр событий на всё приложение: каждое показываемое окно/диалог
+    с системной рамкой получает тёмный/светлый заголовок по теме."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.c = None
+
+    @staticmethod
+    def eligible(w):
+        if not isinstance(w, QWidget) or not w.isWindow():
+            return False
+        if w.windowFlags() & Qt.FramelessWindowHint:
+            return False
+        return w.windowType() in (Qt.Window, Qt.Dialog, Qt.Tool)
+
+    def set_colors(self, c):
+        self.c = c
+        for w in QApplication.topLevelWidgets():
+            if w.isVisible() and self.eligible(w):
+                dwm_style_window(w, c)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Show and self.c is not None and self.eligible(obj):
+            dwm_style_window(obj, self.c)
+        return False
+
+
+_DWM_THEMER = None
+
+
+def install_dwm_themer(app):
+    global _DWM_THEMER
+    if sys.platform != "win32" or _DWM_THEMER is not None:
+        return
+    try:
+        _DWM_THEMER = DwmThemer(app)
+        app.installEventFilter(_DWM_THEMER)
+    except Exception:
+        _DWM_THEMER = None
+
+
+def dwm_set_theme(c):
+    if _DWM_THEMER is not None:
+        try:
+            _DWM_THEMER.set_colors(c)
+        except Exception:
+            pass
+
+
+# ----------------------- Своя рамка окна (0.8.3) -----------------------
+class ElideLabel(QLabel):
+    """Подпись, которая не распирает раскладку: длинный текст — с «…»."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(40)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        text = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, self.width())
+        self.style().drawItemText(p, self.rect(), int(Qt.AlignLeft | Qt.AlignVCenter),
+                                  self.palette(), self.isEnabled(), text, QPalette.WindowText)
+
+
+class WinButton(QPushButton):
+    """Кнопка рамки (— □ ✕): фон и hover — по QSS, значок рисуется QPainter."""
+
+    def __init__(self, kind, parent=None):
+        super().__init__(parent)
+        self.kind = kind  # "min" | "max" | "close"
+        self.setObjectName("winClose" if kind == "close" else "winBtn")
+        self.setFixedSize(46, TitleBar.HEIGHT)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.maximized = False
+        self.fg = QColor("#888888")
+
+    def set_fg(self, color):
+        self.fg = QColor(color)
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)  # фон по QSS (обычный / hover / pressed)
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)  # то же «наведено», что и у фона по QSS
+        hot_close = self.kind == "close" and bool(opt.state & QStyle.State_MouseOver)
+        p = QPainter(self)
+        pen = QPen(QColor("#ffffff") if hot_close else self.fg)
+        pen.setWidthF(1.0)
+        pen.setCapStyle(Qt.FlatCap)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        if self.kind == "min":
+            p.drawLine(QPointF(cx - 5, cy + 0.5), QPointF(cx + 5, cy + 0.5))
+        elif self.kind == "max":
+            if self.maximized:  # «восстановить»: два квадратика
+                p.drawRect(QRectF(cx - 4.5, cy - 2.5, 8, 8))
+                p.drawLine(QPointF(cx - 2.5, cy - 4.5), QPointF(cx + 5.5, cy - 4.5))
+                p.drawLine(QPointF(cx + 5.5, cy - 4.5), QPointF(cx + 5.5, cy + 3.5))
+            else:
+                p.drawRect(QRectF(cx - 4.5, cy - 4.5, 9, 9))
+        else:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            pen.setWidthF(1.1)
+            p.setPen(pen)
+            p.drawLine(QPointF(cx - 5, cy - 5), QPointF(cx + 5, cy + 5))
+            p.drawLine(QPointF(cx + 5, cy - 5), QPointF(cx - 5, cy + 5))
+        p.end()
+
+
+class TitleBar(QFrame):
+    """Полоса заголовка своей рамки: иконка + имя/версия + кнопки — □ ✕.
+    Перетаскивание — startSystemMove, двойной клик — развернуть/восстановить."""
+    HEIGHT = 34
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._win = window
+        self._press_pos = None
+        self.setObjectName("titleBar")
+        self.setFixedHeight(self.HEIGHT)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(11, 0, 0, 0)
+        lay.setSpacing(8)
+        self.icon_lbl = QLabel()
+        self.icon_lbl.setFixedSize(16, 16)
+        self.title_lbl = QLabel(window.windowTitle())
+        self.title_lbl.setObjectName("titleText")
+        for w in (self.icon_lbl, self.title_lbl):
+            # Клики по иконке/подписи уходят в полосу — за неё можно таскать.
+            w.setAttribute(Qt.WA_TransparentForMouseEvents)
+            lay.addWidget(w)
+        lay.addStretch(1)
+        self.btn_min = WinButton("min", self)
+        self.btn_max = WinButton("max", self)
+        self.btn_close = WinButton("close", self)
+        self.btn_min.setToolTip("Свернуть")
+        self.btn_max.setToolTip("Развернуть")
+        self.btn_close.setToolTip("Закрыть")
+        self.btn_min.clicked.connect(window.showMinimized)
+        self.btn_max.clicked.connect(window.toggle_maximize)
+        self.btn_close.clicked.connect(window.close)
+        for b in (self.btn_min, self.btn_max, self.btn_close):
+            lay.addWidget(b)
+        window.windowTitleChanged.connect(self.title_lbl.setText)
+
+    def set_icon(self, icon):
+        self.icon_lbl.setPixmap(icon.pixmap(QSize(16, 16)) if not icon.isNull() else QPixmap())
+
+    def set_colors(self, c):
+        for b in (self.btn_min, self.btn_max, self.btn_close):
+            b.set_fg(c["text"])
+
+    def set_maximized(self, on):
+        self.btn_max.maximized = on
+        self.btn_max.setToolTip("Восстановить" if on else "Развернуть")
+        self.btn_max.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self._win.is_custom_maximized():
+                # Развёрнуто: окно «отлипает» от края, только когда мышь сдвинулась.
+                self._press_pos = event.globalPosition().toPoint()
+            else:
+                wh = self._win.windowHandle()
+                if wh is not None:
+                    wh.startSystemMove()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_pos is not None and (event.buttons() & Qt.LeftButton):
+            gp = event.globalPosition().toPoint()
+            if (gp - self._press_pos).manhattanLength() > 6:
+                self._press_pos = None
+                self._win.restore_for_drag(gp, event.position().x() / max(1, self.width()))
+                wh = self._win.windowHandle()
+                if wh is not None:
+                    wh.startSystemMove()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._press_pos = None
+            self._win.toggle_maximize()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class EdgeGrip(QWidget):
+    """Невидимая 5-px полоса по краю окна для ресайза (startSystemResize);
+    рисует 1-px рамку окна по внешней стороне."""
+    SIZE = 5
+
+    _CURSORS = {
+        "l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor,
+        "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor,
+        "tl": Qt.SizeFDiagCursor, "br": Qt.SizeFDiagCursor,
+        "tr": Qt.SizeBDiagCursor, "bl": Qt.SizeBDiagCursor,
+    }
+    _EDGES = {"l": Qt.LeftEdge, "r": Qt.RightEdge, "t": Qt.TopEdge, "b": Qt.BottomEdge}
+
+    def __init__(self, window, side):
+        super().__init__(window)
+        self.side = side
+        edges = self._EDGES[side[0]]
+        for ch in side[1:]:
+            edges = edges | self._EDGES[ch]
+        self.edges = edges
+        self.color = QColor("#444444")
+        self.setCursor(self._CURSORS[side])
+        self.setObjectName("edgeGrip")
+
+    def set_color(self, color):
+        self.color = QColor(color)
+        self.update()
+
+    def place(self, w, h):
+        s = self.SIZE
+        geo = {
+            "l": (0, s, s, h - 2 * s), "r": (w - s, s, s, h - 2 * s),
+            "t": (s, 0, w - 2 * s, s), "b": (s, h - s, w - 2 * s, s),
+            "tl": (0, 0, s, s), "tr": (w - s, 0, s, s),
+            "bl": (0, h - s, s, s), "br": (w - s, h - s, s, s),
+        }[self.side]
+        self.setGeometry(*geo)
+        self.raise_()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            wh = self.window().windowHandle()
+            if wh is not None:
+                wh.startSystemResize(self.edges)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        if "l" in self.side:
+            p.fillRect(0, 0, 1, h, self.color)
+        if "r" in self.side:
+            p.fillRect(w - 1, 0, 1, h, self.color)
+        if "t" in self.side:
+            p.fillRect(0, 0, w, 1, self.color)
+        if "b" in self.side:
+            p.fillRect(0, h - 1, w, 1, self.color)
+        p.end()
 
 
 # ----------------------- Главное окно -----------------------
@@ -5241,16 +5916,32 @@ class FlowLayout(QLayout):
 
 
 class ExeBuilderWindow(QMainWindow):
-    def __init__(self, app=None, default_style_name="", default_palette=None):
+    def __init__(self, app=None, default_style_name="", default_palette=None, settings=None):
         super().__init__()
         self.app = app
         self.default_style_name = default_style_name
         self.default_palette = QPalette(default_palette) if default_palette is not None else None
-        self.settings = QSettings("AI_Modules", APP_NAME)
+        # settings можно подменить (selftest/скриншоты пишут во временный .ini).
+        self.settings = settings if settings is not None else QSettings("AI_Modules", APP_NAME)
 
-        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
-        self.resize(1000, 720)
-        self.setMinimumSize(860, 600)
+        # Своя рамка: флаги ставим ДО первого show(). SystemMenu/MinMax — чтобы
+        # работали клик по таскбару, Win+↑/↓ и Aero Snap.
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint
+                            | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint)
+        self._frameless = True
+        self._max_on = False          # «своё» развёртывание (на availableGeometry)
+        self._normal_geo = None       # геометрия до развёртывания
+        self._start_maximized = False
+        self.setWindowTitle(f"{APP_NAME} — v{APP_VERSION} · Qt6")
+        self.resize(1040, 780)
+        self.setMinimumSize(900, 700)
+        self.c = dict(MODERN_THEMES[MODERN_DARK], close=CLOSE_RED)
+        self._chip_state = "ok"
+        self._restoring_fields = False
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(400)
+        self._save_timer.timeout.connect(self._save_fields)
 
         self.worker = None
         self.is_busy = False
@@ -5279,10 +5970,14 @@ class ExeBuilderWindow(QMainWindow):
         self.unknown_imports = []
 
         self._build_ui()
+        self._build_frame()
         self._initial_logs()
         self._restore_style()
         self._restore_python_exe()
+        self._restore_fields()
         self._restore_icon_style()
+        self._restore_geometry()
+        self._connect_autosave()
 
     def _build_ui(self):
         central = QWidget()
@@ -5293,30 +5988,23 @@ class ExeBuilderWindow(QMainWindow):
         root.setContentsMargins(16, 12, 16, 12)
         root.setSpacing(12)
 
-        # ---------- Шапка: название + бейдж версии + статус + шестерёнка ----------
-        header = QHBoxLayout()
-        title = QLabel(APP_NAME)
-        title.setObjectName("appTitle")
-        f = title.font(); f.setPointSize(13); f.setBold(True); title.setFont(f)
-        header.addWidget(title)
-        badge = QLabel(APP_VERSION)
-        badge.setObjectName("versionBadge")
-        header.addWidget(badge)
-        header.addStretch(1)
-        self.status_label = QLabel(f"Готово. Версия {APP_VERSION}")
-        self.status_label.setObjectName("statusLabel")
-        header.addWidget(self.status_label)
+        # ---------- Шапка: иконка, версия, чип статуса, плитки, тема, меню ⋯ ----------
+        root.addWidget(self._build_header())
 
-        self.style_btn = QToolButton()
-        self.style_btn.setObjectName("gearBtn")
-        self.style_btn.setText("⚙")
-        self.style_btn.setToolTip("Сменить стиль оформления / тему")
-        gf = self.style_btn.font(); gf.setPointSize(14); self.style_btn.setFont(gf)
-        self.style_btn.setFixedSize(36, 32)
-        self.style_btn.setPopupMode(QToolButton.InstantPopup)
-        self.style_btn.setMenu(self._build_style_menu())
-        header.addWidget(self.style_btn)
-        root.addLayout(header)
+        # Всё ниже шапки — в прокрутке: при открытом «⚙ Ещё» на невысоком
+        # экране поля не сплющиваются, а появляется полоса прокрутки.
+        scroll = QScrollArea()
+        scroll.setObjectName("contentScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        inner = QWidget()
+        inner.setObjectName("contentInner")
+        body = QVBoxLayout(inner)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(12)
+        scroll.setWidget(inner)
+        root.addWidget(scroll, 1)
 
         # ---------- Две карточки: Проект | Имя, иконка, опции ----------
         cards = QHBoxLayout()
@@ -5460,7 +6148,7 @@ class ExeBuilderWindow(QMainWindow):
         ol.addLayout(chips)
         ol.addStretch(1)
         cards.addWidget(opts, 4)
-        root.addLayout(cards)
+        body.addLayout(cards)
 
         # ---------- Панель действий ----------
         go = QHBoxLayout()
@@ -5510,7 +6198,7 @@ class ExeBuilderWindow(QMainWindow):
         self.expert_btn.setToolTip("Эксперт-настройки (для редких случаев)")
         self.expert_btn.toggled.connect(self._toggle_expert)
         go.addWidget(self.expert_btn)
-        root.addLayout(go)
+        body.addLayout(go)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("buildProgress")
@@ -5518,7 +6206,7 @@ class ExeBuilderWindow(QMainWindow):
         self.progress_bar.setFixedHeight(4)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setVisible(False)
-        root.addWidget(self.progress_bar)
+        body.addWidget(self.progress_bar)
 
         # ---------- Эксперт-настройки (свёрнуто) ----------
         self.expert_box = QGroupBox("Эксперт-настройки (для редких случаев)")
@@ -5579,6 +6267,7 @@ class ExeBuilderWindow(QMainWindow):
             "и через него соберёт EXE."
         )
         self.target_os_combo.currentIndexChanged.connect(self._on_target_os_changed)
+        self._compact_combo(self.target_os_combo, 22)
         target_row.addWidget(self.target_os_combo, 1)
         target_row.addWidget(QLabel("Арх.:"))
         self.arch_combo = QComboBox()
@@ -5590,6 +6279,7 @@ class ExeBuilderWindow(QMainWindow):
             "Для «Текущий»/«Свой Python» игнорируется (берётся арх. того интерпретатора)."
         )
         self.arch_combo.currentIndexChanged.connect(self._on_build_arch_changed)
+        self._compact_combo(self.arch_combo, 14)
         target_row.addWidget(self.arch_combo)
         self.check_python_btn = QPushButton("🐍 Проверить")
         self.check_python_btn.clicked.connect(self._check_python_exe)
@@ -5628,7 +6318,7 @@ class ExeBuilderWindow(QMainWindow):
 
         eg.setColumnStretch(1, 1)
         self.expert_box.setVisible(False)
-        root.addWidget(self.expert_box)
+        body.addWidget(self.expert_box)
 
         # ---------- Лог (карточка с кнопками в шапке) ----------
         log_card = self._make_card()
@@ -5638,11 +6328,9 @@ class ExeBuilderWindow(QMainWindow):
         log_head = QHBoxLayout()
         log_head.addWidget(self._make_caption("Лог"))
         log_head.addStretch(1)
-        self.about_btn = QPushButton("О программе")
         self.copy_log_btn = QPushButton("Копировать лог")
         self.clear_log_btn = QPushButton("Очистить лог")
-        for b, slot in ((self.about_btn, self.show_about),
-                        (self.copy_log_btn, self.copy_log),
+        for b, slot in ((self.copy_log_btn, self.copy_log),
                         (self.clear_log_btn, self.clear_log)):
             b.setObjectName("linkBtn")
             b.setCursor(Qt.PointingHandCursor)
@@ -5656,8 +6344,417 @@ class ExeBuilderWindow(QMainWindow):
         self.log_view.setMaximumBlockCount(20000)  # длинный лог PyInstaller не тормозит UI
         self.log_view.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         f2 = QFont("Consolas, monospace"); f2.setStyleHint(QFont.Monospace); self.log_view.setFont(f2)
+        self.log_view.setMinimumHeight(110)
+        # Высоту лога диктует окно, а не sizeHint — иначе прокрутка появляется
+        # раньше, чем нужно (FlowLayout считает высоту по sizeHint).
+        self.log_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         lc.addWidget(self.log_view)
-        root.addWidget(log_card, 1)
+        body.addWidget(log_card, 1)
+
+    # ---------- Шапка (0.8.3) ----------
+    STAT_TILES = (
+        ("imports", "импортов всего", "Всего импортов верхнего уровня (после анализа)"),
+        ("third", "сторонних", "Сторонние библиотеки (pip)"),
+        ("unknown", "неизвестных", "Не найдены / динамические импорты"),
+        ("exe", "размер EXE", "Размер последнего собранного EXE"),
+    )
+    CHIP_TEXT = {"ok": "● готов", "busy": "● сборка…", "err": "● ошибка"}
+
+    def _build_header(self):
+        bar = QFrame()
+        bar.setObjectName("headerBar")
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(12, 9, 10, 9)
+        h.setSpacing(10)
+
+        self.header_icon = AppIconWidget(40)
+        h.addWidget(self.header_icon)
+
+        col = QVBoxLayout()
+        col.setSpacing(3)
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        title = QLabel(APP_NAME)
+        title.setObjectName("appTitle")
+        f = title.font(); f.setPointSize(13); f.setBold(True); title.setFont(f)
+        row1.addWidget(title)
+        badge = QLabel(f"v{APP_VERSION}")
+        badge.setObjectName("versionBadge")
+        row1.addWidget(badge)
+        row1.addStretch(1)
+        col.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
+        self.status_chip = QLabel(self.CHIP_TEXT["ok"])
+        self.status_chip.setObjectName("statChip")
+        self.status_chip.setProperty("state", "ok")
+        row2.addWidget(self.status_chip)
+        self.status_label = ElideLabel(f"Готово. Версия {APP_VERSION}")
+        self.status_label.setObjectName("statusLabel")
+        row2.addWidget(self.status_label, 1)
+        col.addLayout(row2)
+        h.addLayout(col, 1)
+
+        self._tiles = {}
+        vf = QFont(self.font()); vf.setPointSize(12); vf.setBold(True)
+        lf = QFont(self.font()); lf.setPointSize(8)
+        for key, label, tip in self.STAT_TILES:
+            tile = QFrame()
+            tile.setObjectName("statTile")
+            tile.setMinimumWidth(92)
+            tile.setToolTip(tip)
+            tv = QVBoxLayout(tile)
+            tv.setContentsMargins(10, 4, 10, 5)
+            tv.setSpacing(0)
+            val = QLabel("—")
+            val.setObjectName("tileValue")
+            val.setFont(vf)
+            lab = QLabel(label)
+            lab.setObjectName("tileLabel")
+            lab.setFont(lf)
+            tv.addWidget(val)
+            tv.addWidget(lab)
+            h.addWidget(tile)
+            self._tiles[key] = (tile, val, tip)
+
+        h.addSpacing(4)
+        self.theme_btn = QToolButton()
+        self.theme_btn.setObjectName("hdrBtn")
+        self.theme_btn.setFixedSize(36, 36)
+        tf = self.theme_btn.font(); tf.setPointSize(13); self.theme_btn.setFont(tf)
+        self.theme_btn.setCursor(Qt.PointingHandCursor)
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        h.addWidget(self.theme_btn)
+
+        self.more_btn = QToolButton()
+        self.more_btn.setObjectName("hdrBtn")
+        self.more_btn.setText("⋯")
+        self.more_btn.setFixedSize(36, 36)
+        mf = self.more_btn.font(); mf.setPointSize(14); mf.setBold(True); self.more_btn.setFont(mf)
+        self.more_btn.setToolTip("Меню: о программе, папка workspace, стиль, сброс настроек")
+        self.more_btn.setCursor(Qt.PointingHandCursor)
+        self.more_btn.setPopupMode(QToolButton.InstantPopup)
+        self.more_menu = self._build_more_menu()
+        self.more_btn.setMenu(self.more_menu)
+        h.addWidget(self.more_btn)
+        return bar
+
+    def _build_more_menu(self):
+        menu = QMenu(self)
+        for text, slot in (("ℹ  О программе", self.show_about),
+                           ("📂  Открыть папку workspace", self.open_workspace_dir)):
+            act = QAction(text, self)
+            act.triggered.connect(slot)
+            menu.addAction(act)
+        style_menu = self._build_style_menu()
+        style_menu.setTitle("🎨  Стиль оформления")
+        menu.addMenu(style_menu)
+        menu.addSeparator()
+        act = QAction("♻  Сбросить настройки", self)
+        act.triggered.connect(self.reset_settings)
+        menu.addAction(act)
+        return menu
+
+    def _set_chip(self, state, text=None):
+        self._chip_state = state
+        self.status_chip.setText(text or self.CHIP_TEXT.get(state, ""))
+        self.status_chip.setProperty("state", state)
+        st = self.status_chip.style()
+        st.unpolish(self.status_chip)
+        st.polish(self.status_chip)
+
+    def _set_tile(self, key, value, tip=None):
+        tile, val, base_tip = self._tiles[key]
+        val.setText(value)
+        tile.setToolTip(f"{base_tip}\n{tip}" if tip else base_tip)
+
+    def _update_import_tiles(self, result):
+        third = result.get("third") or []
+        unknown = result.get("unknown") or []
+        local = result.get("local") or []
+        stdlib = result.get("stdlib") or []
+        total = len(third) + len(unknown) + len(local) + len(stdlib)
+        self._set_tile("imports", str(total),
+                       f"stdlib: {len(stdlib)} · локальных: {len(local)} · "
+                       f".py файлов: {result.get('py_files_count', '?')}")
+        self._set_tile("third", str(len(third)), ", ".join(third) or "нет")
+        self._set_tile("unknown", str(len(unknown)), ", ".join(unknown) or "нет")
+
+    @staticmethod
+    def _fmt_size(n):
+        if n >= 1024 ** 3:
+            return f"{n / 1024 ** 3:.2f} ГБ"
+        if n >= 1024 ** 2:
+            return f"{n / 1024 ** 2:.1f} МБ"
+        return f"{max(1, n // 1024)} КБ"
+
+    def _update_exe_tile(self, exe_path):
+        try:
+            p = Path(exe_path)
+            size = p.stat().st_size
+            note = str(p)
+            if (p.parent / "_internal").is_dir():  # onedir — считаем всю папку
+                size = sum(f.stat().st_size for f in p.parent.rglob("*") if f.is_file())
+                note = f"папка onedir: {p.parent}"
+            self._set_tile("exe", self._fmt_size(size), note)
+        except Exception:
+            self._set_tile("exe", "—")
+
+    def _reset_tiles(self):
+        for key, _label, _tip in self.STAT_TILES:
+            self._set_tile(key, "—")
+
+    # ---------- Своя рамка окна (0.8.3) ----------
+    def _build_frame(self):
+        self.title_bar = TitleBar(self)
+        self.setMenuWidget(self.title_bar)  # полоса заголовка — над всем содержимым
+        self._grips = [EdgeGrip(self, side) for side in ("l", "r", "t", "b", "tl", "tr", "bl", "br")]
+        icon = self.app.windowIcon() if self.app is not None else QIcon()
+        if icon.isNull():
+            icon = make_app_icon()
+        self.setWindowIcon(icon)
+        self.title_bar.set_icon(icon)
+        self._layout_grips()
+
+    def _layout_grips(self):
+        w, h = self.width(), self.height()
+        for g in getattr(self, "_grips", []):
+            g.place(w, h)  # place() делает raise_() — края поверх всех детей
+            g.setVisible(not self._max_on)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_grips()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._layout_grips()
+
+    def is_custom_maximized(self):
+        return self._max_on
+
+    def toggle_maximize(self):
+        if self._max_on:
+            self._restore_normal()
+        else:
+            self._maximize_to_screen()
+
+    def _maximize_to_screen(self, normal_geo=None):
+        scr = self.screen() or QGuiApplication.primaryScreen()
+        if scr is None:
+            return
+        if not self._max_on:
+            self._normal_geo = QRect(normal_geo if normal_geo is not None else self.geometry())
+        self._max_on = True
+        # Не showMaximized(): frameless-окно Windows развернёт поверх таскбара.
+        self.setGeometry(scr.availableGeometry())
+        self._sync_frame_state()
+
+    def _restore_normal(self):
+        self._max_on = False
+        if self._normal_geo is not None and self._normal_geo.isValid():
+            self.setGeometry(self._normal_geo)
+        self._sync_frame_state()
+
+    def restore_for_drag(self, global_pos, rel_x):
+        """Тянут за заголовок развёрнутого окна: вернуть обычный размер так,
+        чтобы курсор остался на той же доле ширины заголовка."""
+        if not self._max_on:
+            return
+        geo = QRect(self._normal_geo) if (self._normal_geo and self._normal_geo.isValid()) \
+            else QRect(0, 0, 1040, 780)
+        self._max_on = False
+        geo.moveTo(int(global_pos.x() - rel_x * geo.width()), global_pos.y() - TitleBar.HEIGHT // 2)
+        self.setGeometry(geo)
+        self._sync_frame_state()
+
+    def _sync_frame_state(self):
+        if hasattr(self, "title_bar"):
+            self.title_bar.set_maximized(self._max_on)
+        self._layout_grips()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.WindowStateChange and self._frameless:
+            if self.windowState() & Qt.WindowMaximized:
+                # Win+↑ / Aero Snap / двойной клик системы: переводим в «своё»
+                # развёртывание на availableGeometry (таскбар остаётся видимым).
+                prev = QRect(self.normalGeometry())
+                QTimer.singleShot(0, lambda g=prev: self._adopt_system_maximize(g))
+        super().changeEvent(event)
+
+    def _adopt_system_maximize(self, normal_geo):
+        if not (self.windowState() & Qt.WindowMaximized):
+            return
+        self.setWindowState(self.windowState() & ~Qt.WindowMaximized)
+        self._maximize_to_screen(normal_geo if normal_geo.isValid() else None)
+
+    # ---------- Тема: всё обновляется разом (0.8.3) ----------
+    def _apply_chrome_colors(self):
+        c = self.c
+        if hasattr(self, "title_bar"):
+            self.title_bar.set_colors(c)
+            self.title_bar.update()
+        for g in getattr(self, "_grips", []):
+            g.set_color(c["input_border"])
+        dark = theme_is_dark(c)
+        self.theme_btn.setText("☀" if dark else "☾")
+        self.theme_btn.setToolTip("Светлая тема" if dark else "Тёмная тема")
+        self._set_chip(self._chip_state, self.status_chip.text())
+        self._refresh_file_card()
+        dwm_set_theme(c)
+        self.update()
+
+    def toggle_theme(self):
+        self._apply_and_save(MODERN_LIGHT if theme_is_dark(self.c) else MODERN_DARK)
+
+    # ---------- Автосохранение полей (0.8.3) ----------
+    DEFAULT_CHECKS = {
+        "opt_onefile": True, "opt_windowed": True, "opt_auto_opt": True, "opt_upx": True,
+        "opt_universal": True, "opt_debug": False, "opt_clean": True, "opt_install_pi": True,
+        "opt_collect_all": False, "opt_max_compat": False, "opt_bundle_ffmpeg": False,
+    }
+
+    def _persist_edits(self):
+        return {
+            "main_file": self.main_file_edit, "project_dir": self.project_dir_edit,
+            "output_dir": self.output_dir_edit, "app_name": self.app_name_edit,
+            "custom_icon": self.icon_edit, "ffmpeg_path": self.ffmpeg_edit,
+        }
+
+    def _persist_checks(self):
+        return {
+            "opt_onefile": self.onefile_chk, "opt_windowed": self.windowed_chk,
+            "opt_auto_opt": self.auto_opt_chk, "opt_upx": self.upx_chk,
+            "opt_universal": self.universal_chk, "opt_debug": self.debug_chk,
+            "opt_clean": self.clean_chk, "opt_install_pi": self.install_pi_chk,
+            "opt_collect_all": self.collect_all_chk, "opt_max_compat": self.max_compat_chk,
+            "opt_bundle_ffmpeg": self.bundle_ffmpeg_chk,
+        }
+
+    def _connect_autosave(self):
+        for edit in self._persist_edits().values():
+            edit.textChanged.connect(self._schedule_save)
+        for chk in self._persist_checks().values():
+            chk.toggled.connect(self._schedule_save)
+        self.builtin_icon_combo.currentTextChanged.connect(self._schedule_save)
+        self.expert_btn.toggled.connect(self._schedule_save)
+
+    def _schedule_save(self, *_):
+        if not self._restoring_fields:
+            self._save_timer.start()
+
+    def _save_fields(self):
+        s = self.settings
+        for key, edit in self._persist_edits().items():
+            s.setValue(key, edit.text())
+        for key, chk in self._persist_checks().items():
+            s.setValue(key, bool(chk.isChecked()))
+        s.setValue("builtin_icon", self.builtin_icon_combo.currentText())
+        s.setValue("expert_open", bool(self.expert_btn.isChecked()))
+        s.sync()
+
+    def _restore_fields(self):
+        s = self.settings
+        self._restoring_fields = True
+        try:
+            for key, edit in self._persist_edits().items():
+                if s.contains(key):
+                    edit.setText(s.value(key, "", type=str) or "")
+            for key, chk in self._persist_checks().items():
+                if s.contains(key):
+                    chk.blockSignals(True)  # без «взаимоисключений» опций при загрузке
+                    chk.setChecked(s.value(key, self.DEFAULT_CHECKS[key], type=bool))
+                    chk.blockSignals(False)
+            icon = s.value("builtin_icon", "", type=str) or ""
+            if icon == NO_BUILTIN_ICON or icon in BUILTIN_ICONS:
+                self.builtin_icon_combo.setCurrentText(icon)
+            self.expert_btn.setChecked(s.value("expert_open", False, type=bool))
+        finally:
+            self._restoring_fields = False
+        self._refresh_file_card()
+
+    def _restore_geometry(self):
+        geo = self.settings.value("win_geometry", None)
+        rect = geo if isinstance(geo, QRect) else None
+        if rect is not None and rect.isValid():
+            visible = any(scr.availableGeometry().intersects(rect)
+                          for scr in QGuiApplication.screens())
+            if visible:
+                rect.setWidth(max(rect.width(), self.minimumWidth()))
+                rect.setHeight(max(rect.height(), self.minimumHeight()))
+                self.setGeometry(rect)
+        self._start_maximized = self.settings.value("win_maximized", False, type=bool)
+
+    def _save_geometry(self):
+        normal = self._normal_geo if (self._max_on and self._normal_geo) else self.geometry()
+        self.settings.setValue("win_geometry", QRect(normal))
+        self.settings.setValue("win_maximized", bool(self._max_on))
+
+    def show_restored(self):
+        """Показ окна с учётом сохранённого «развёрнуто»."""
+        self.show()
+        if self._start_maximized:
+            self._maximize_to_screen()
+
+    def reset_settings(self):
+        ans = QMessageBox.question(
+            self, "Сбросить настройки",
+            "Вернуть все настройки к значениям по умолчанию?\n\n"
+            "Сбросятся пути, имя EXE, иконка, опции, Python для сборки и тема.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+        self._save_timer.stop()
+        self.settings.clear()
+        self._restoring_fields = True
+        try:
+            for key, edit in self._persist_edits().items():
+                edit.setText(str(fallback_output_dir()) if key == "output_dir"
+                             else ("MyApp" if key == "app_name" else ""))
+            for key, chk in self._persist_checks().items():
+                chk.blockSignals(True)
+                chk.setChecked(self.DEFAULT_CHECKS[key])
+                chk.blockSignals(False)
+            self.builtin_icon_combo.setCurrentText("Python Blue")
+            self.expert_btn.setChecked(False)
+            self.python_exe_edit.clear()
+            for combo, value in ((self.target_os_combo, "current"), (self.arch_combo, "amd64")):
+                for i in range(combo.count()):
+                    if combo.itemData(i) == value:
+                        combo.setCurrentIndex(i)
+                        break
+        finally:
+            self._restoring_fields = False
+        self._icon_style = ""
+        self._update_icon_preview()
+        self._on_target_os_changed()
+        self._apply_and_save(MODERN_DARK)
+        self._reset_tiles()
+        self._refresh_file_card()
+        self._save_fields()
+        self.write_log("♻ Настройки сброшены к значениям по умолчанию.")
+        self.set_status("Настройки сброшены")
+
+    def _open_folder(self, folder):
+        folder = Path(folder)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if sys.platform.startswith("win"):
+                os.startfile(folder)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, "Папка", f"Не удалось открыть папку:\n{folder}\n\n{exc}")
+            return False
+
+    def open_workspace_dir(self):
+        folder = self._current_workspace_dir()
+        if self._open_folder(folder):
+            self.write_log(f"📂 Открыта рабочая папка: {folder}")
 
     # ---------- UI-хелперы (0.8.0) ----------
     EXPERT_BTN_OFF = "⚙ Ещё ▾"
@@ -5694,6 +6791,15 @@ class ExeBuilderWindow(QMainWindow):
         act.setToolTip(tip)
         act.triggered.connect(slot)
         return act
+
+    @staticmethod
+    def _compact_combo(combo, chars):
+        """Комбо не распирает окно длинными пунктами: ширина — по `chars`
+        символам, а выпадающий список — во всю ширину текста."""
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        combo.setMinimumContentsLength(chars)
+        view = combo.view()
+        view.setMinimumWidth(view.sizeHintForColumn(0) + 36)
 
     @staticmethod
     def _make_chip(text, checked, layout):
@@ -5735,7 +6841,7 @@ class ExeBuilderWindow(QMainWindow):
             n_py = 0
         self.file_card_text.setText(
             f"<b>{html_escape(p.name)}</b><br>"
-            f"<span style='color:#8b93a1'>{html_escape(str(p.parent))} · {n_py} .py</span>"
+            f"<span style='color:{self.c['mute']}'>{html_escape(str(p.parent))} · {n_py} .py</span>"
         )
         self.file_card.setVisible(True)
         self.drop_zone.setVisible(False)
@@ -5828,17 +6934,48 @@ class ExeBuilderWindow(QMainWindow):
         self._update_icon_preview()
 
     # ---------- choose paths ----------
+    def _dlg_start_dir(self, *edits):
+        """Стартовая папка для диалога: из заполненных полей, иначе пусто."""
+        for edit in edits:
+            t = edit.text().strip()
+            if t:
+                p = Path(t)
+                p = p if p.is_dir() else p.parent
+                if p.is_dir():
+                    return str(p)
+        return ""
+
+    def _file_dialog(self, title, start_dir="", name_filter="", dirs=False):
+        """Qt-диалог выбора файла/папки (не системный — в цветах темы,
+        с тёмным DWM-заголовком в Windows). Возвращает путь или ''."""
+        dlg = QFileDialog(self, title, start_dir or "")
+        dlg.setOptions(DIR_DLG_OPTS if dirs else FILE_DLG_OPTS)
+        if dirs:
+            dlg.setFileMode(QFileDialog.Directory)
+        else:
+            dlg.setFileMode(QFileDialog.ExistingFile)
+            if name_filter:
+                dlg.setNameFilters(name_filter.split(";;"))
+        dlg.resize(900, 560)
+        if dlg.exec() != QDialog.Accepted:
+            return ""
+        files = dlg.selectedFiles()
+        return files[0] if files else ""
+
     def choose_main_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Выбери главный Python-файл", "",
-            "Python files (*.py *.pyw);;All files (*.*)"
+        path = self._file_dialog(
+            "Выбери главный Python-файл",
+            self._dlg_start_dir(self.main_file_edit, self.project_dir_edit),
+            "Python files (*.py *.pyw);;All files (*.*)",
         )
         if not path:
             return
         self._set_main_file(path)
 
     def choose_project_dir(self):
-        folder = QFileDialog.getExistingDirectory(self, "Выбери папку проекта")
+        folder = self._file_dialog(
+            "Выбери папку проекта",
+            self._dlg_start_dir(self.project_dir_edit, self.main_file_edit), dirs=True)
         if folder:
             self.project_dir_edit.setText(folder)
             self._apply_project_defaults(Path(folder))
@@ -5850,13 +6987,16 @@ class ExeBuilderWindow(QMainWindow):
         self.write_log(f"Папка EXE установлена рядом с проектом: {out}")
 
     def choose_output_dir(self):
-        folder = QFileDialog.getExistingDirectory(self, "Выбери папку для готового EXE")
+        folder = self._file_dialog(
+            "Выбери папку для готового EXE",
+            self._dlg_start_dir(self.output_dir_edit, self.project_dir_edit), dirs=True)
         if folder:
             self.output_dir_edit.setText(folder)
 
     def choose_icon(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Выбери иконку .ico", "", "Icon files (*.ico);;All files (*.*)"
+        path = self._file_dialog(
+            "Выбери иконку .ico", self._dlg_start_dir(self.icon_edit, self.project_dir_edit),
+            "Icon files (*.ico);;All files (*.*)",
         )
         if path:
             self.icon_edit.setText(path)
@@ -5890,9 +7030,9 @@ class ExeBuilderWindow(QMainWindow):
         cur = self.python_exe_edit.text().strip()
         if cur and Path(cur).exists():
             start_dir = str(Path(cur).parent)
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Выбери python.exe для сборки", start_dir,
-            "Python executable (python.exe pythonw.exe);;All files (*.*)"
+        path = self._file_dialog(
+            "Выбери python.exe для сборки", start_dir,
+            "Python executable (python.exe pythonw.exe);;All files (*.*)",
         )
         if path:
             self.python_exe_edit.setText(path)
@@ -6007,9 +7147,9 @@ class ExeBuilderWindow(QMainWindow):
             self._restoring = False
 
     def _choose_ffmpeg(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Выбери ffmpeg.exe (или ffprobe.exe)", "",
-            "Executables (*.exe);;All files (*.*)"
+        path = self._file_dialog(
+            "Выбери ffmpeg.exe (или ffprobe.exe)", self._dlg_start_dir(self.ffmpeg_edit),
+            "Executables (*.exe);;All files (*.*)",
         )
         if path:
             self.ffmpeg_edit.setText(path)
@@ -6042,7 +7182,7 @@ class ExeBuilderWindow(QMainWindow):
             return
 
         self._stop_requested = False
-        self.set_busy(True)
+        self.set_busy(True, "● загрузка…")
         self.set_status("Скачивание ffmpeg...")
         self.download_ffmpeg_btn.setEnabled(False)
         self.download_ffmpeg_btn.setText("Скачивание...")
@@ -6078,6 +7218,7 @@ class ExeBuilderWindow(QMainWindow):
             self.set_status("Скачивание остановлено")
             return
         self.set_status("Ошибка скачивания ffmpeg")
+        self._set_chip("err")
         QMessageBox.critical(
             self, "Не удалось скачать ffmpeg",
             f"{text}\n\nМожно скачать вручную с https://www.gyan.dev/ffmpeg/builds/ "
@@ -6116,17 +7257,7 @@ class ExeBuilderWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", str(exc))
 
     def open_output_dir(self):
-        folder = self._current_output_dir()
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-            if sys.platform.startswith("win"):
-                os.startfile(folder)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(folder)])
-            else:
-                subprocess.Popen(["xdg-open", str(folder)])
-        except Exception as exc:
-            QMessageBox.warning(self, "Папка EXE", f"Не удалось открыть папку:\n{folder}\n\n{exc}")
+        self._open_folder(self._current_output_dir())
 
     # ---------- helpers ----------
     def _current_project_or_app_dir(self):
@@ -6168,19 +7299,19 @@ class ExeBuilderWindow(QMainWindow):
         QTimer.singleShot(1200, lambda: self.copy_log_btn.setText(prev))
         self.set_status(f"Лог скопирован в буфер ({len(text)} символов)")
 
-    _LOG_COLORS = (
-        (("❌", "Ошибка", "ОШИБКА", "ERROR", "Traceback", "FAILED"), "#e5534b"),
-        (("⚠", "WARNING", "Предупреж", "не найден"), "#d4a72c"),
-        (("✓", "✅", "Готово", "Успешно"), "#3fb950"),
+    _LOG_COLORS = (  # (признаки, ключ цвета темы)
+        (("❌", "Ошибка", "ОШИБКА", "ERROR", "Traceback", "FAILED"), "err"),
+        (("⚠", "WARNING", "Предупреж", "не найден"), "warn"),
+        (("✓", "✅", "Готово", "Успешно"), "ok"),
     )
 
     def write_log(self, text=""):
         """Лог с подсветкой: ошибки — красным, предупреждения — жёлтым, успех — зелёным."""
         text = str(text)
         color = ""
-        for keys, col in self._LOG_COLORS:
+        for keys, ckey in self._LOG_COLORS:
             if any(k in text for k in keys):
-                color = col
+                color = self.c.get(ckey, "")
                 break
         style = "white-space:pre-wrap;"
         if color:
@@ -6189,12 +7320,15 @@ class ExeBuilderWindow(QMainWindow):
 
     def set_status(self, text):
         self.status_label.setText(text)
+        self.status_label.setToolTip(text)
+        self.status_label.update()
 
     CONVERT_BTN_IDLE = "🚀  Сделать EXE"
     CONVERT_BTN_BUSY = "⏳  Идёт сборка..."
 
-    def set_busy(self, busy):
+    def set_busy(self, busy, chip_text=None):
         self.is_busy = busy
+        self._set_chip("busy" if busy else "ok", chip_text if busy else None)
         self.analyze_btn.setEnabled(not busy)
         # Кнопка сборки: блокируем + явно показываем состояние текстом.
         self.convert_btn.setEnabled(not busy)
@@ -6217,7 +7351,7 @@ class ExeBuilderWindow(QMainWindow):
 
     # ---------- меню стилей ----------
     def _build_style_menu(self):
-        menu = QMenu(self)
+        menu = QMenu("Стиль оформления", self)
         self._style_group = QActionGroup(self)
         self._style_group.setExclusive(True)
         self._style_actions = {}
@@ -6245,12 +7379,14 @@ class ExeBuilderWindow(QMainWindow):
         return menu
 
     def _apply_and_save(self, name):
-        if self.app is None:
-            return
-        apply_style(self.app, name, self.default_style_name, self.default_palette)
+        """Смена темы обновляет всё сразу: QSS, палитру, рамку окна,
+        шапку (чип/плитки), DWM-заголовки открытых диалогов."""
+        if self.app is not None:
+            self.c = apply_style(self.app, name, self.default_style_name, self.default_palette)
         self.settings.setValue("style_v2", name)
         if name in self._style_actions:
             self._style_actions[name].setChecked(True)
+        self._apply_chrome_colors()
 
     def _restore_style(self):
         if self.app is None:
@@ -6301,11 +7437,21 @@ class ExeBuilderWindow(QMainWindow):
             f"<li>Генерация <code>requirements_detected.txt</code> и отчёта.</li>"
             f"<li>Встроенный набор иконок ({len(BUILTIN_ICONS)} шт.) с превью; экспорт всего набора.</li>"
             f"<li>Своя .ico, автоустановка PyInstaller, темы оформления, копирование лога.</li>"
+            f"<li>0.8.3: своя рамка окна, тема ☀/☾, плитки-счётчики в шапке, "
+            f"автосохранение настроек, диалоги в цветах темы, <code>--selftest</code>.</li>"
             f"</ul>"
             f"<p>Папки сборки создаются рядом с проектом: "
             f"<code>EXE_Output/</code> и <code>_py_to_exe_builder/</code>.</p>"
         )
-        QMessageBox.about(self, f"О программе — {APP_NAME}", text)
+        box = QMessageBox(self)
+        box.setWindowTitle(f"О программе — {APP_NAME}")
+        box.setTextFormat(Qt.RichText)
+        box.setText(text)
+        box.setIconPixmap(app_icon_pixmap(64, self.devicePixelRatioF()))
+        # Шире стандартных 400 px — иначе длинный текст вытягивается в «простыню».
+        box.setStyleSheet("QLabel#qt_msgbox_label { min-width: 560px; }")
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
 
     def _validate_paths(self):
         main_file = Path(self.main_file_edit.text().strip())
@@ -6347,7 +7493,7 @@ class ExeBuilderWindow(QMainWindow):
         main_file, project_dir, output_dir, _ = data
 
         self._stop_requested = False
-        self.set_busy(True)
+        self.set_busy(True, "● анализ…")
         self.set_status("Анализ...")
         w = AnalyzeWorker(main_file, project_dir, output_dir)
         w.log.connect(self.write_log)
@@ -6359,6 +7505,7 @@ class ExeBuilderWindow(QMainWindow):
     def _on_analyze_done(self, result):
         self.third_party_imports = result["third"]
         self.unknown_imports = result["unknown"]
+        self._update_import_tiles(result)
         self.set_busy(False)
         self.set_status("Анализ завершен")
 
@@ -6407,6 +7554,7 @@ class ExeBuilderWindow(QMainWindow):
             return
         self.third_party_imports = result["third"]
         self.unknown_imports = result["unknown"]
+        self._update_import_tiles(result)
         qt_used = result.get("qt_used") or {}
         uses_tkinter = bool(result.get("uses_tkinter"))
 
@@ -6585,6 +7733,7 @@ class ExeBuilderWindow(QMainWindow):
             f"• Запустить сборку снова"
         )
         self.set_busy(False)
+        self._set_chip("err")
         self.set_status("Сборка прервана")
         self._pending_convert = None
 
@@ -6630,13 +7779,17 @@ class ExeBuilderWindow(QMainWindow):
         self.set_status("Готово")
         if code == 0:
             if exe_path:
+                self._update_exe_tile(exe_path)
                 self.write_log(f"Готово: {exe_path}")
                 self._reveal_exe(exe_path)  # папка открывается сразу, до модального окна
                 QMessageBox.information(self, "Готово", f"EXE создан:\n{exe_path}")
             else:
+                self._set_chip("err")
                 self.write_log("PyInstaller завершился без ошибки, но EXE не найден. Проверь лог.")
                 QMessageBox.warning(self, "Проверь лог", "Сборка завершилась, но EXE не найден.")
         else:
+            self._set_chip("err")
+            self.set_status(f"Ошибка сборки (код {code})")
             self.write_log(f"Ошибка сборки. Код: {code}")
             QMessageBox.critical(self, "Ошибка", "Сборка не завершилась. Проверь лог.")
 
@@ -6677,6 +7830,13 @@ class ExeBuilderWindow(QMainWindow):
                     cancel()
             for w in self._active_threads():
                 w.wait(10000)
+        self._save_timer.stop()
+        try:
+            self._save_fields()
+            self._save_geometry()
+            self.settings.sync()
+        except Exception:
+            pass
         event.accept()
 
     def _on_worker_failed(self, text):
@@ -6686,19 +7846,167 @@ class ExeBuilderWindow(QMainWindow):
             self.write_log(f"⏹ Остановлено: {text}")
             return
         self.set_busy(False)
+        self._set_chip("err")
         self.set_status("Ошибка")
         self.write_log(f"Ошибка: {text}")
         QMessageBox.critical(self, "Ошибка", text)
 
 
-def main():
-    app = QApplication(sys.argv)
+def create_app(argv=None):
+    """QApplication со своей иконкой, Qt-диалогами и DWM-заголовками (Windows)."""
+    set_app_user_model_id()  # до QApplication — иначе таскбар группирует с python.exe
+    app = QApplication.instance() or QApplication(list(argv) if argv is not None else sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True)
+    # Русские кнопки в Qt-диалогах («Да/Нет/Отмена», диалог выбора файлов).
+    try:
+        from PySide6.QtCore import QTranslator, QLibraryInfo, QLocale
+        tr = QTranslator(app)
+        if tr.load(QLocale(QLocale.Russian, QLocale.Russia), "qtbase", "_",
+                   QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+            app.installTranslator(tr)
+    except Exception:
+        pass
+    app.setWindowIcon(make_app_icon())
+    install_dwm_themer(app)
+    return app
+
+
+def run_selftest():
+    """--selftest: зависимости, окно (без показа), ядро. Итог — консоль и selftest.txt."""
+    lines = [f"{APP_NAME} v{APP_VERSION} — selftest",
+             f"Python {sys.version.split()[0]} ({platform.architecture()[0]}), {sys.platform}, "
+             f"frozen={bool(getattr(sys, 'frozen', False))}", ""]
+    state = {"ok": True}
+
+    def check(name, fn):
+        try:
+            res = fn()
+            lines.append(f"✓ {name}" + (f": {res}" if res else ""))
+        except Exception as exc:
+            state["ok"] = False
+            lines.append(f"✗ {name}: {type(exc).__name__}: {exc}")
+
+    def _deps():
+        mods = [m for m, _pip in REQUIRED] + [
+            "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",
+            "ast", "json", "zipfile", "hashlib", "urllib.request", "ctypes", "struct"]
+        for m in mods:
+            importlib.import_module(m)
+        import PySide6
+        from PySide6.QtCore import qVersion
+        return f"PySide6 {PySide6.__version__}, Qt {qVersion()}"
+    check("зависимости", _deps)
+
+    # Без дисплея (CI/Linux) — offscreen; в Windows — обычная платформа, окно не показываем.
+    if (sys.platform != "win32" and not os.environ.get("QT_QPA_PLATFORM")
+            and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")):
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    tmp = Path(tempfile.mkdtemp(prefix="p2e_selftest_"))
+    holder = {}
+
+    def _app():
+        app = create_app([sys.argv[0]])
+        holder["app"] = app
+        icon = app.windowIcon()
+        sizes = icon.availableSizes()
+        assert not icon.isNull() and len(sizes) >= len(APP_ICON_SIZES), "иконка приложения пустая"
+        return f"платформа {app.platformName()}, иконка {len(sizes)} размеров"
+    check("QApplication + иконка", _app)
+
+    def _window():
+        app = holder["app"]
+        settings = QSettings(str(tmp / "selftest.ini"), QSettings.IniFormat)
+        win = ExeBuilderWindow(app, app.style().objectName(), QPalette(app.palette()), settings=settings)
+        holder["win"] = win
+        assert APP_VERSION in win.windowTitle(), "нет версии в заголовке"
+        assert win.windowFlags() & Qt.FramelessWindowHint, "нет своей рамки"
+        assert win.menuWidget() is win.title_bar, "нет полосы заголовка"
+        assert len(win._grips) == 8, "нет краёв для ресайза"
+        return win.windowTitle()
+    check("главное окно (без показа)", _window)
+
+    def _themes():
+        win = holder["win"]
+        win._apply_and_save(MODERN_LIGHT)
+        assert not theme_is_dark(win.c) and win.theme_btn.text() == "☾"
+        qss = holder["app"].styleSheet()
+        for part in ("QMessageBox QLabel", "QFileDialog", "#titleBar", "#winClose:hover"):
+            assert part in qss, f"в QSS нет {part}"
+        win._apply_and_save(MODERN_DARK)
+        assert theme_is_dark(win.c) and win.theme_btn.text() == "☀"
+        pal = holder["app"].palette()
+        assert pal.color(QPalette.ColorRole.Window).name() == MODERN_THEMES[MODERN_DARK]["bg"]
+        return "dark/light, QSS + палитра"
+    check("темы", _themes)
+
+    def _imports():
+        proj = tmp / "proj"
+        (proj / "pkg").mkdir(parents=True)
+        (proj / "main.py").write_text(
+            "import os, json\nimport PySide6.QtWidgets\nfrom .rel import x\nimport helper\n",
+            encoding="utf-8")
+        (proj / "helper.py").write_text("from pkg import tool\n", encoding="utf-8")
+        (proj / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        (proj / "pkg" / "tool.py").write_bytes("\ufeffimport zipfile\n".encode("utf-8"))  # с BOM
+        (proj / "build").mkdir()
+        (proj / "build" / "junk.py").write_text("import should_not_be_seen\n", encoding="utf-8")
+        tops, dotted, files = collect_project_imports(proj)
+        expect = {"os", "json", "PySide6", "helper", "pkg", "zipfile"}
+        assert tops == expect, f"импорты {sorted(tops)} ≠ {sorted(expect)}"
+        assert "PySide6.QtWidgets" in dotted and len(files) == 4, f"файлов: {len(files)}"
+        local = local_module_names(proj)
+        assert {"helper", "pkg", "main"} <= local, f"локальные: {sorted(local)}"
+        assert classify_import("os", proj, local) == "stdlib"
+        assert classify_import("helper", proj, local) == "local"
+        assert detect_used_qt_modules("PySide6", dotted) >= {"QtWidgets"}
+        return f"{len(tops)} импортов в {len(files)} файлах"
+    check("анализ импортов (collect_project_imports)", _imports)
+
+    def _icons():
+        ico = tmp / "t.ico"
+        write_ico(ico, "Python Blue")
+        data = ico.read_bytes()
+        assert data[:4] == b"\x00\x00\x01\x00" and len(data) > 1000, "битый .ico"
+        assert not make_preview_pixmap("Python Blue", 32).isNull()
+        return f"{len(BUILTIN_ICONS)} встроенных иконок, .ico {len(data)} байт"
+    check("иконки (.ico и превью)", _icons)
+
+    def _header():
+        win = holder["win"]
+        win._update_import_tiles({"third": ["requests"], "unknown": [], "local": ["a"],
+                                  "stdlib": ["os", "json"], "py_files_count": 2})
+        assert win._tiles["imports"][1].text() == "4" and win._tiles["third"][1].text() == "1"
+        win.set_busy(True)
+        assert win.status_chip.text() == ExeBuilderWindow.CHIP_TEXT["busy"]
+        win.set_busy(False)
+        return "плитки и чип статуса"
+    check("шапка", _header)
+
+    win = holder.get("win")
+    if win is not None:
+        win._save_timer.stop()
+        win.deleteLater()
+    shutil.rmtree(tmp, ignore_errors=True)
+    path = _write_selftest_report(lines, state["ok"])
+    if path is not None and sys.stdout is not None:
+        try:
+            print(f"Отчёт: {path}")
+        except Exception:
+            pass
+    return 0 if state["ok"] else 1
+
+
+def main():
+    if "--selftest" in sys.argv:
+        sys.exit(run_selftest())
+    app = create_app()
     default_style_name = app.style().objectName() if app.style() else ""
     default_palette = QPalette(app.palette())
     win = ExeBuilderWindow(app, default_style_name, default_palette)
-    win.show()
+    win.setWindowIcon(app.windowIcon())
+    win.show_restored()
     sys.exit(app.exec())
 
 
