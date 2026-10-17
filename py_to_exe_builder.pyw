@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-py_to_exe_builder.pyw  v0.8.3
+py_to_exe_builder.pyw  v0.8.4
 Py To EXE Builder
-Версия: 0.8.3  (PySide6 / Qt6)
+Версия: 0.8.4  (PySide6 / Qt6)
+
+Изменения 0.8.4:
+- 🐍 «Целевая ОС»: в списке появились установленные на ПК Python
+  (py -0p + типовые папки) — 3.12/3.13 выбираются одним кликом.
+- ⬆ Режим «Windows 10+» теперь скачивает Python 3.12.10 (было 3.11.9).
+- 🖥 Эмодзи 🖥/🪐/🪁 заменены: в шрифте Windows 10 их нет (были квадраты).
 
 Изменения 0.8.3:
 - 📦 Авто-установка библиотек: при запуске .pyw недостающий PySide6 ставится
@@ -10,7 +16,7 @@ Py To EXE Builder
   с командой для ручной установки).
 - 🧪 Режим --selftest: проверка зависимостей, окна и ядра → консоль
   и selftest.txt, код возврата 0/1 (используется в build_exe.bat).
-- 🪟 Своя рамка окна: тёмная/светлая полоса заголовка с иконкой, версией
+- 🖥 Своя рамка окна: тёмная/светлая полоса заголовка с иконкой, версией
   и кнопками — □ ✕, перетаскивание, двойной клик, Win+↑, ресайз за края.
 - 🧭 Шапка: иконка, версия, чип статуса (готов / сборка… / ошибка),
   плитки-счётчики (импортов, сторонних, неизвестных, размер EXE),
@@ -33,7 +39,7 @@ Py To EXE Builder
 - 🐛 Правильный путь к exe в режиме onedir, без подхвата устаревшего exe.
 - 📦 Перед pip показывается список пакетов на подтверждение; в «Свой Python»
   ставятся только отсутствующие пакеты без -U; кэш хеша зависимостей.
-- 🪟 yt-dlp_win7.exe вшивается только если проект использует yt_dlp.
+- 🖥 yt-dlp_win7.exe вшивается только если проект использует yt_dlp.
 - ⚡ Проверка python и поиск UPX больше не блокируют окно; лог ограничен.
 - 🔒 UPX закреплён на версии 4.2.4; SHA256-проверка для известных хешей.
 
@@ -212,7 +218,7 @@ Py To EXE Builder
   нужен MP3-экстракт.
 
 Изменения 0.7.5:
-- 🪟 Гибридная Win7-сборка с bundled standalone yt-dlp.exe.
+- 🖥 Гибридная Win7-сборка с bundled standalone yt-dlp.exe.
   Когда «Целевая ОС» = Windows 7 — сборщик автоматически:
     1) Скачивает СВЕЖИЙ yt-dlp_win7.exe из nicolaasjan/yt-dlp
        (фактически рекомендованный yt-dlp командой fork для Win7,
@@ -270,7 +276,7 @@ Py To EXE Builder
   Без этого сборка под Win7 падала на этапе «Установка pip».
 
 Изменения 0.7.0:
-- 🪟 Один выпадающий список «Целевая ОС»: Текущий Python / Windows 7+ /
+- 🖥 Один выпадающий список «Целевая ОС»: Текущий Python / Windows 7+ /
   Windows 10+ / Windows 11 / Свой Python. При выборе Windows-варианта
   сборщик САМ скачивает embeddable Python нужной версии в подпапку
   «portable_pythons» в %LOCALAPPDATA% (ASCII-путь, не лезет в систему!),
@@ -318,12 +324,13 @@ Py To EXE Builder
 Автор: RomzesPRA-2026.
 """
 
-APP_VERSION = "0.8.3"
+APP_VERSION = "0.8.4"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 APP_USER_MODEL_ID = "PyToExeBuilder.App"
 
 import ast
+import re
 import importlib
 import importlib.metadata
 import importlib.util
@@ -3196,7 +3203,7 @@ def _preview_glyph_text(glyph):
         "file": "📄", "file_plus": "📄+", "file_code": "{}", "file_zip": "🗜",
         # 0.7.9
         "anchor": "⚓", "umbrella": "☂", "hourglass": "⌛", "puzzle": "🧩",
-        "planet": "🪐", "ufo": "🛸", "gem": "💎", "megaphone": "📣",
+        "planet": "🌍", "ufo": "🛸", "gem": "💎", "megaphone": "📣",
         "power": "⏻", "signal": "📶", "chart_bars": "📊", "chart_line": "📈",
         "chart_pie": "◔", "chain": "🔗", "sword": "⚔", "potion": "🧪",
         "joystick": "🕹", "moon_star": "🌙", "cursor": "➤",
@@ -3204,7 +3211,7 @@ def _preview_glyph_text(glyph):
         # 0.7.16
         "hearts": "💕", "broken_heart": "💔", "valentine": "💌",
         "butterfly": "🦋", "clover": "🍀", "candle": "🕯", "balloon": "🎈",
-        "cake": "🎂", "tulip": "🌷", "snowman": "⛄", "kite": "🪁",
+        "cake": "🎂", "tulip": "🌷", "snowman": "⛄", "kite": "🎈",
         "bee": "🐝", "ladybug": "🐞", "turtle": "🐢", "rabbit": "🐰",
         "duck": "🦆", "penguin": "🐧", "glasses": "👓", "tshirt": "👕",
         "ring_gem": "💍", "crystal_ball": "🔮", "tophat": "🎩",
@@ -3701,6 +3708,67 @@ def real_python_exe():
     return found
 
 
+def find_installed_pythons():
+    """Установленные на ПК Python: [{"exe", "ver", "bits"}], новые сверху.
+    Источники: `py -0p` (лаунчер Windows) + типовые папки установки.
+    Portable-кэш сборщика и venv не включаются. Без запуска python.exe."""
+    found = {}
+
+    def add(exe, ver="", bits=""):
+        try:
+            exe = Path(exe)
+            if not exe.is_file() or exe.name.lower() not in ("python.exe", "python3", "python"):
+                return
+            key = os.path.normcase(str(exe.resolve()))
+        except OSError:
+            return
+        if key.startswith(os.path.normcase(str(portable_python_root()))):
+            return
+        if (exe.parent / "pyvenv.cfg").exists() or (exe.parent.parent / "pyvenv.cfg").exists():
+            return
+        if not ver:  # «Python313» / «Python313-32» → 3.13
+            m = re.search(r"python(\d)(\d+)(-32|-arm64)?$", exe.parent.name, re.I)
+            if m:
+                ver = f"{m.group(1)}.{m.group(2)}"
+                bits = bits or {"-32": "32", "-arm64": "arm64"}.get((m.group(3) or "").lower(), "64")
+        old = found.get(key)
+        if old and old["ver"] and not ver:
+            return
+        found[key] = {"exe": str(exe), "ver": ver, "bits": bits or "64"}
+
+    if sys.platform.startswith("win"):
+        py = shutil.which("py")
+        if py:
+            try:
+                r = subprocess.run([py, "-0p"], capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=10, **_hide_window_kwargs())
+                for line in (r.stdout or "").splitlines():
+                    # « -V:3.13 *   C:\...\python.exe»  или  « -3.9-64   C:\...»
+                    m = re.match(r"\s*-(?:V:)?(\d+\.\d+)(t)?(-32|-64|-arm64)?\s*\*?\s+(.+\.exe)\s*$", line, re.I)
+                    if m and not m.group(2):  # free-threaded (3.13t) пропускаем
+                        bits = {"-32": "32", "-arm64": "arm64"}.get((m.group(3) or "").lower(), "64")
+                        add(m.group(4).strip(), m.group(1), bits)
+            except Exception:
+                pass
+        roots = [os.environ.get("LOCALAPPDATA", "") + r"\Programs\Python",
+                 os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                 "C:\\"]
+        for root in roots:
+            try:
+                for d in Path(root).glob("Python3*"):
+                    add(d / "python.exe")
+            except OSError:
+                pass
+
+    def sort_key(x):
+        try:
+            return tuple(int(n) for n in x["ver"].split("."))
+        except ValueError:
+            return (0,)
+    return sorted(found.values(), key=sort_key, reverse=True)
+
+
 _CLASSIFY_PROBE = r"""
 import sys, json, os, importlib.util, sysconfig
 names = json.loads(sys.stdin.read())
@@ -3814,18 +3882,18 @@ PORTABLE_PYTHONS = {
         "note": "Сборка через интерпретатор, в котором запущен сам сборщик.",
     },
     "win7": {
-        "label": "🪟 Windows 7 / 8 / 8.1  →  Python 3.8.10 (авто-скачать)",
+        "label": "🖥 Windows 7 / 8 / 8.1  →  Python 3.8.10 (авто-скачать)",
         "version": "3.8.10",
         "note": "Python 3.8.10 — последняя версия с поддержкой Windows 7. "
                 "На Win7 целевой ПК должен иметь SP1 + KB2999226 (UCRT).",
     },
     "win10": {
-        "label": "🪟 Windows 10+   →  Python 3.11.9 (авто-скачать)",
-        "version": "3.11.9",
-        "note": "Python 3.11 — стабильная актуальная версия для Win10/11.",
+        "label": "🖥 Windows 10+   →  Python 3.12.10 (авто-скачать)",
+        "version": "3.12.10",
+        "note": "Python 3.12.10 — последний выпуск 3.12 с готовыми сборками для Windows.",
     },
     "win11": {
-        "label": "🪟 Windows 11 (новейший)  →  Python 3.13.10 (авто-скачать)",
+        "label": "🖥 Windows 11 (новейший)  →  Python 3.13.10 (авто-скачать)",
         "version": "3.13.10",
         "note": "Python 3.13 — последняя стабильная.",
     },
@@ -4636,7 +4704,7 @@ class ConvertWorker(QThread):
             is_win7_mode = (self.p.get("python_mode") == "win7")
             if is_win7_mode and not app_name.endswith("_win7"):
                 app_name = f"{app_name}_win7"
-                self.log.emit(f"🪟 Win7-режим: имя exe → {app_name}.exe")
+                self.log.emit(f"🖥 Win7-режим: имя exe → {app_name}.exe")
 
             # Арх-суффикс для авто-скачиваемых Python (кроме amd64), чтобы
             # x86/ARM64-сборка не затирала x64-версию в той же папке вывода.
@@ -4833,7 +4901,7 @@ class ConvertWorker(QThread):
                 ytdlp_exe = self._ensure_nicolaasjan_ytdlp()
                 if ytdlp_exe:
                     cmd.extend(["--add-binary", f"{ytdlp_exe};."])
-                    self.log.emit(f"🪟 Bundle yt-dlp_win7.exe → внутрь EXE: {ytdlp_exe}")
+                    self.log.emit(f"🖥 Bundle yt-dlp_win7.exe → внутрь EXE: {ytdlp_exe}")
                     self.log.emit("   Приложение найдёт его через sys._MEIPASS и будет вызывать как subprocess.")
                     # Также НЕ нужно ставить упоминание UPX-исключения через подстановку —
                     # bundled exe не пакуется UPX (большой и сжат уже).
@@ -5217,6 +5285,18 @@ class PythonProbeWorker(QThread):
         except Exception as exc:
             info = {"ok": False, "error": str(exc)}
         self.done.emit(self.path, info)
+
+
+class InstalledPythonsWorker(QThread):
+    """find_installed_pythons в фоне (py -0p может думать секунду-две)."""
+    done = Signal(list)
+
+    def run(self):
+        try:
+            res = find_installed_pythons()
+        except Exception:
+            res = []
+        self.done.emit(res)
 
 
 # ----------------------- Диалог выбора встроенной иконки -----------------------
@@ -5974,6 +6054,7 @@ class ExeBuilderWindow(QMainWindow):
         self._initial_logs()
         self._restore_style()
         self._restore_python_exe()
+        self._scan_installed_pythons()
         self._restore_fields()
         self._restore_icon_style()
         self._restore_geometry()
@@ -7006,6 +7087,51 @@ class ExeBuilderWindow(QMainWindow):
     def _current_python_mode(self):
         return self.target_os_combo.currentData() or "current"
 
+    def _python_choice(self):
+        """(режим, путь). Установленный Python («inst:<путь>») = «custom» с этим путём."""
+        mode = self._current_python_mode()
+        if mode.startswith("inst:"):
+            return "custom", mode[5:]
+        return mode, self.python_exe_edit.text().strip()
+
+    @staticmethod
+    def _installed_label(ver, bits, exe):
+        b = {"32": "32-бит", "arm64": "ARM64"}.get(bits, "64-бит")
+        v = f"Python {ver}" if ver else Path(exe).parent.name
+        return f"🐍 {v} ({b}, установлен на ПК)"
+
+    def _add_installed_item(self, exe, label):
+        """Вставить установленный Python после «Текущий» (без дублей)."""
+        key = "inst:" + exe
+        for i in range(self.target_os_combo.count()):
+            if self.target_os_combo.itemData(i) == key:
+                self.target_os_combo.setItemText(i, label)
+                return
+        pos = 1
+        while pos < self.target_os_combo.count() and str(self.target_os_combo.itemData(pos)).startswith("inst:"):
+            pos += 1
+        self.target_os_combo.insertItem(pos, label, key)
+        self.target_os_combo.setItemData(pos, exe, Qt.ToolTipRole)
+
+    def _scan_installed_pythons(self):
+        w = InstalledPythonsWorker()
+        w.done.connect(self._on_installed_pythons)
+        w.finished.connect(lambda w=w: self._probe_workers.remove(w) if w in self._probe_workers else None)
+        self._probe_workers.append(w)
+        w.start()
+
+    def _on_installed_pythons(self, items):
+        self.target_os_combo.blockSignals(True)
+        try:
+            for it in items:
+                self._add_installed_item(it["exe"], self._installed_label(it["ver"], it["bits"], it["exe"]))
+        finally:
+            self.target_os_combo.blockSignals(False)
+        if items:
+            self.write_log("🐍 Найдены установленные Python: "
+                           + ", ".join(it["ver"] or Path(it["exe"]).parent.name for it in items)
+                           + " — выбираются в «Целевая ОС» (⚙ Ещё).")
+
     def _current_build_arch(self):
         return self.arch_combo.currentData() or "amd64"
 
@@ -7016,7 +7142,7 @@ class ExeBuilderWindow(QMainWindow):
     def _on_target_os_changed(self):
         mode = self._current_python_mode()
         self.settings.setValue("python_mode", mode)
-        # Поле «свой путь» видно только в режиме custom.
+        # Поле «свой путь» видно только в режиме custom (не для установленных).
         is_custom = (mode == "custom")
         self.python_path_lbl.setVisible(is_custom)
         self.python_exe_edit.setVisible(is_custom)
@@ -7045,10 +7171,10 @@ class ExeBuilderWindow(QMainWindow):
 
     def _check_python_exe(self):
         """Кнопка «Проверить»: показывает что будет использовано в текущем режиме."""
-        mode = self._current_python_mode()
+        mode, path = self._python_choice()
         spec = PORTABLE_PYTHONS.get(mode, {})
         if mode in ("current", "custom"):
-            path = self.python_exe_edit.text().strip() if mode == "custom" else ""
+            path = path if mode == "custom" else ""
             if mode == "custom" and not path:
                 QMessageBox.warning(self, "Путь не задан", "Укажи путь к python.exe.")
                 return
@@ -7093,7 +7219,7 @@ class ExeBuilderWindow(QMainWindow):
 
     def _on_probe_label(self, path, info):
         # Ответ мог устареть — пользователь уже сменил путь/режим.
-        if self._current_python_mode() != "custom" or self.python_exe_edit.text().strip() != path:
+        if self._python_choice() != ("custom", path):
             return
         if info.get("ok"):
             pi_txt = "PyInstaller: ✓" if info.get("has_pyinstaller") else "PyInstaller: ✗ (поставится авто)"
@@ -7102,14 +7228,13 @@ class ExeBuilderWindow(QMainWindow):
             self.python_info_lbl.setText(f"❌ Python не работает: {info.get('error')}")
 
     def _refresh_python_info(self):
-        mode = self._current_python_mode()
+        mode, path = self._python_choice()
         spec = PORTABLE_PYTHONS.get(mode, {})
         if mode == "current":
             ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
             self.python_info_lbl.setText(f"🐍 Будет использован текущий Python {ver}")
             return
         if mode == "custom":
-            path = self.python_exe_edit.text().strip()
             if not path:
                 self.python_info_lbl.setText("📁 Укажи путь к python.exe")
                 return
@@ -7124,12 +7249,15 @@ class ExeBuilderWindow(QMainWindow):
         arch = self._current_build_arch()
         ready = is_portable_python_ready(version, arch)
         status = "✓ готов (кэш)" if ready else "⬇ будет скачан при сборке (~30 МБ)"
-        self.python_info_lbl.setText(f"🪟 Python {version} ({arch})  •  {status}")
+        self.python_info_lbl.setText(f"🖥 Python {version} ({arch})  •  {status}")
 
     def _restore_python_exe(self):
         saved_mode = self.settings.value("python_mode", "current", type=str) or "current"
         saved_path = self.settings.value("python_exe", "", type=str) or ""
         saved_arch = self.settings.value("build_arch", "amd64", type=str) or "amd64"
+        # Сохранён установленный Python — пункт добавляем сразу (скан идёт в фоне).
+        if saved_mode.startswith("inst:") and Path(saved_mode[5:]).is_file():
+            self._add_installed_item(saved_mode[5:], self._installed_label("", "", saved_mode[5:]))
         for i in range(self.target_os_combo.count()):
             if self.target_os_combo.itemData(i) == saved_mode:
                 self.target_os_combo.setCurrentIndex(i)
@@ -7520,8 +7648,8 @@ class ExeBuilderWindow(QMainWindow):
 
         # Пре-флайт: режим «Свой Python» требует валидный путь — иначе сборка
         # падает только в конце, уже после скачивания UPX/ffmpeg. Проверяем сразу.
-        if self._current_python_mode() == "custom":
-            custom = self.python_exe_edit.text().strip()
+        cmode, custom = self._python_choice()
+        if cmode == "custom":
             if not custom or not Path(custom).is_file():
                 QMessageBox.warning(
                     self, "Свой Python: путь не задан",
@@ -7693,9 +7821,9 @@ class ExeBuilderWindow(QMainWindow):
             "bundle_ffmpeg": self.bundle_ffmpeg_chk.isChecked(),
             "upx_enabled": self.upx_chk.isChecked(),
             "ffmpeg_path": self.ffmpeg_edit.text().strip(),
-            "python_mode": self._current_python_mode(),
+            "python_mode": self._python_choice()[0],
             "build_arch": self._current_build_arch(),
-            "python_exe": self.python_exe_edit.text().strip(),
+            "python_exe": self._python_choice()[1],
             "third": self.third_party_imports,
             "unknown": self.unknown_imports,
             "qt_used": qt_used,
