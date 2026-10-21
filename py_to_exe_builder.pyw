@@ -1,8 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-py_to_exe_builder.pyw  v0.8.4
+py_to_exe_builder.pyw  v0.9.0
 Py To EXE Builder
-Версия: 0.8.4  (PySide6 / Qt6)
+Версия: 0.9.0  (PySide6 / Qt6)
+
+Изменения 0.9.0:
+- 🔄 Обновление с GitHub (общий модуль gh_update 1.1.0, файлы gh_update*.py
+  рядом): меню ⋯ → «🔄 Обновление с GitHub…» — токен «только чтение»,
+  ветка, автопроверка (через 30 с после запуска и дальше каждые 12 ч),
+  «Обновить до X.Y.Z», «Что нового» (CHANGELOG.txt), перезапуск. Новая
+  версия — кнопка «⬆ X.Y.Z» в шапке и пометка в меню. Настройки upd_* —
+  там же, где остальные (QSettings); «Сбросить настройки» токен не трогает.
 
 Изменения 0.8.4:
 - 🐍 «Целевая ОС»: в списке появились установленные на ПК Python
@@ -324,7 +332,7 @@ Py To EXE Builder
 Автор: RomzesPRA-2026.
 """
 
-APP_VERSION = "0.8.4"
+APP_VERSION = "0.9.0"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 APP_USER_MODEL_ID = "PyToExeBuilder.App"
@@ -693,6 +701,11 @@ QToolButton#hdrBtn {{ background: {c['chip']}; color: {c['text']}; border: 1px s
     border-radius: 8px; padding: 0; }}
 QToolButton#hdrBtn:hover {{ background: {c['hover']}; border-color: {c['accent']}; }}
 QToolButton#hdrBtn::menu-indicator {{ image: none; width: 0; }}
+QPushButton#updChip {{ background: {c['accent']}; color: #ffffff; border: none; border-radius: 6px;
+    padding: 1px 8px; font-weight: 600; min-width: 0; }}
+QPushButton#updChip:hover {{ background: {c['accent2']}; }}
+QDialog#updDlg QPushButton {{ min-width: 30px; padding: 4px 8px; }}
+QWidget#setinner QGroupBox {{ padding: 8px 0 0 0; }}
 """
 
 
@@ -5996,6 +6009,8 @@ class FlowLayout(QLayout):
 
 
 class ExeBuilderWindow(QMainWindow):
+    upd_log_sig = Signal(str)  # 0.9.0: строка лога обновления из рабочего потока
+
     def __init__(self, app=None, default_style_name="", default_palette=None, settings=None):
         super().__init__()
         self.app = app
@@ -6059,6 +6074,7 @@ class ExeBuilderWindow(QMainWindow):
         self._restore_icon_style()
         self._restore_geometry()
         self._connect_autosave()
+        self._build_update()  # 0.9.0: обновление с GitHub (автопроверка)
 
     def _build_ui(self):
         central = QWidget()
@@ -6462,6 +6478,12 @@ class ExeBuilderWindow(QMainWindow):
         badge = QLabel(f"v{APP_VERSION}")
         badge.setObjectName("versionBadge")
         row1.addWidget(badge)
+        # 0.9.0: на GitHub новая версия — кнопка «⬆ X.Y.Z» (до этого скрыта)
+        self.upd_chip = QPushButton("⬆")
+        self.upd_chip.setObjectName("updChip")
+        self.upd_chip.setCursor(Qt.PointingHandCursor)
+        self.upd_chip.hide()
+        row1.addWidget(self.upd_chip)
         row1.addStretch(1)
         col.addLayout(row1)
         row2 = QHBoxLayout()
@@ -6527,6 +6549,9 @@ class ExeBuilderWindow(QMainWindow):
             act = QAction(text, self)
             act.triggered.connect(slot)
             menu.addAction(act)
+        self._upd_act = QAction("🔄  Обновление с GitHub…", self)
+        self._upd_act.triggered.connect(self.open_update)
+        menu.addAction(self._upd_act)
         style_menu = self._build_style_menu()
         style_menu.setTitle("🎨  Стиль оформления")
         menu.addMenu(style_menu)
@@ -6777,6 +6802,72 @@ class ExeBuilderWindow(QMainWindow):
         if self._start_maximized:
             self._maximize_to_screen()
 
+    # ---------- 0.9.0: обновление с GitHub (gh_update) ----------
+    UPD_KEYS = ("upd_token", "upd_auto", "upd_branch", "upd_every_h")
+
+    def _build_update(self):
+        """Окно «Обновление с GitHub» создаётся сразу (скрытым) — автопроверка
+        идёт с запуска; показывается из меню ⋯ или по кнопке «⬆ X.Y.Z»."""
+        import gh_update
+        import gh_update_qt
+        from gh_update_qt import UpdatePage
+        gh_update_qt.set_colors(lambda: {"accent": self.c["accent"], "text": self.c["text"],
+                                         "dim": self.c["mute"], "panel": self.c["card"],
+                                         "border": self.c["border"]})
+        target = gh_update.UpdateTarget(
+            owner="romzespra-collab", repo="Py_to_exe_builder", name="py_to_exe_builder",
+            current=APP_VERSION, app_dir=str(APP_ROOT), main_file="py_to_exe_builder.pyw",
+            changelog="CHANGELOG.txt", where="⋯ → 🔄 Обновление с GitHub")
+        st = self.settings
+
+        def cfg_get():
+            return {"token": st.value("upd_token", "", type=str) or "",
+                    "auto": st.value("upd_auto", True, type=bool),
+                    "branch": st.value("upd_branch", "main", type=str) or "main",
+                    "every_h": st.value("upd_every_h", 12, type=int) or 12}
+
+        def cfg_set(v):
+            st.setValue("upd_token", v["token"])
+            st.setValue("upd_auto", bool(v["auto"]))
+            st.setValue("upd_branch", v["branch"] or "main")
+            st.setValue("upd_every_h", int(v.get("every_h") or 12))
+            st.sync()
+
+        self._upd_dlg = QDialog(self)
+        self._upd_dlg.setObjectName("updDlg")
+        self._upd_dlg.setWindowTitle(f"Обновление с GitHub — {APP_NAME} v{APP_VERSION}")
+        self._upd_dlg.resize(940, 470)
+        lay = QVBoxLayout(self._upd_dlg)
+        lay.setContentsMargins(4, 6, 4, 6)
+        self.update_page = UpdatePage(target, cfg_get, cfg_set, on_quit=self._upd_quit,
+                                      log=self._upd_log)
+        lay.addWidget(self.update_page)
+        self.update_page.box.available.connect(self._update_available)
+        self.upd_log_sig.connect(self.write_log)
+        self.upd_chip.clicked.connect(self.open_update)
+
+    def _upd_log(self, text):
+        # зовётся и из рабочего потока gh_update — в лог через сигнал (UI-поток)
+        self.upd_log_sig.emit(str(text))
+
+    def open_update(self):
+        self._upd_dlg.show()
+        self._upd_dlg.raise_()
+        self._upd_dlg.activateWindow()
+
+    def _update_available(self, ver):
+        """На GitHub новая версия: кнопка в шапке и пометка в меню ⋯."""
+        self.upd_chip.setText(f"⬆ {ver}")
+        self.upd_chip.setToolTip(f"Доступна версия {ver} — меню ⋯ → «🔄 Обновление с GitHub»")
+        self.upd_chip.show()
+        self._upd_act.setText(f"🔄  Обновление с GitHub — есть {ver}…")
+
+    def _upd_quit(self):
+        """После обновления (новая копия уже запущена) — закрыть программу полностью."""
+        self._upd_dlg.hide()
+        if self.close():
+            QApplication.instance().quit()
+
     def reset_settings(self):
         ans = QMessageBox.question(
             self, "Сбросить настройки",
@@ -6787,7 +6878,10 @@ class ExeBuilderWindow(QMainWindow):
         if ans != QMessageBox.Yes:
             return
         self._save_timer.stop()
+        keep = {k: self.settings.value(k) for k in self.UPD_KEYS if self.settings.contains(k)}
         self.settings.clear()
+        for k, v in keep.items():  # 0.9.0: токен и настройки обновления не сбрасываем
+            self.settings.setValue(k, v)
         self._restoring_fields = True
         try:
             for key, edit in self._persist_edits().items():
@@ -8027,6 +8121,14 @@ def run_selftest():
         return f"PySide6 {PySide6.__version__}, Qt {qVersion()}"
     check("зависимости", _deps)
 
+    def _gh_update():
+        import gh_update
+        for m in ("gh_update_qt", "gh_update_help"):
+            importlib.import_module(m)
+        assert gh_update.newer("0.9.1", APP_VERSION) and not gh_update.newer(APP_VERSION, APP_VERSION)
+        return f"gh_update {gh_update.VERSION}"
+    check("модули обновления (gh_update)", _gh_update)
+
     # Без дисплея (CI/Linux) — offscreen; в Windows — обычная платформа, окно не показываем.
     if (sys.platform != "win32" and not os.environ.get("QT_QPA_PLATFORM")
             and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")):
@@ -8130,6 +8232,9 @@ def main():
     if "--selftest" in sys.argv:
         sys.exit(run_selftest())
     app = create_app()
+    # 0.9.0: после обновления — подождать, пока старая копия закроется
+    import gh_update
+    gh_update.wait_previous(sys.argv)
     default_style_name = app.style().objectName() if app.style() else ""
     default_palette = QPalette(app.palette())
     win = ExeBuilderWindow(app, default_style_name, default_palette)

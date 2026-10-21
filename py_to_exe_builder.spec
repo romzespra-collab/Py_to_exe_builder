@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# py_to_exe_builder.spec  v0.8.4 — PyInstaller: один файл, без консоли, без UPX.
+# py_to_exe_builder.spec  v0.9.0 — PyInstaller: один файл, без консоли, без UPX.
 # Сборка: build_exe.bat  (или: python -m PyInstaller --noconfirm --clean py_to_exe_builder.spec)
 
 # Лишние модули Qt — не нужны сборщику, только раздувают EXE.
@@ -19,7 +19,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=["gh_update", "gh_update_qt", "gh_update_help"],  # 0.9.0: обновление с GitHub
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

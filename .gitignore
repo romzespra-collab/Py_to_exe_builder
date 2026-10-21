@@ -6,3 +6,4 @@ selftest.txt
 config.json
 *.zip
 !release/*.zip
+backup/
