@@ -1,4 +1,4 @@
-py_to_exe_builder  v0.9.0
+py_to_exe_builder  v0.9.1
 ═════════════════════════
 
 Py To EXE Builder — графический сборщик Python-проектов в Windows EXE
@@ -76,6 +76,9 @@ release/py_to_exe_builder_vX.Y.Z.zip из ветки main, ставит пове
 
 ИЗМЕНЕНИЯ
 ─────────
+0.9.1
+• Модуль обновления gh_update 1.1.1: «Что нового» из CHANGELOG.txt.
+
 0.9.0
 • Обновление с GitHub: меню ⋯ → «🔄 Обновление с GitHub…», автопроверка,
   кнопка «⬆ X.Y.Z» в шапке; подробно — CHANGELOG.txt.

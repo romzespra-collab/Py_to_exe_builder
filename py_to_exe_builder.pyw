@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-py_to_exe_builder.pyw  v0.9.0
+py_to_exe_builder.pyw  v0.9.1
 Py To EXE Builder
-Версия: 0.9.0  (PySide6 / Qt6)
+Версия: 0.9.1  (PySide6 / Qt6)
+
+Изменения 0.9.1:
+- 🔄 Обновление модуля gh_update 1.1.1: «Что нового» из журнала проекта
+  (CHANGELOG.txt); инструкция «Как получить токен» показывает настоящий
+  файл с версией; кнопка автопроверки — в цветах темы.
 
 Изменения 0.9.0:
 - 🔄 Обновление с GitHub (общий модуль gh_update 1.1.0, файлы gh_update*.py
@@ -332,7 +337,7 @@ Py To EXE Builder
 Автор: RomzesPRA-2026.
 """
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.1"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 APP_USER_MODEL_ID = "PyToExeBuilder.App"
@@ -8125,7 +8130,7 @@ def run_selftest():
         import gh_update
         for m in ("gh_update_qt", "gh_update_help"):
             importlib.import_module(m)
-        assert gh_update.newer("0.9.1", APP_VERSION) and not gh_update.newer(APP_VERSION, APP_VERSION)
+        assert gh_update.newer(APP_VERSION + ".1", APP_VERSION) and not gh_update.newer(APP_VERSION, APP_VERSION)
         return f"gh_update {gh_update.VERSION}"
     check("модули обновления (gh_update)", _gh_update)
 
