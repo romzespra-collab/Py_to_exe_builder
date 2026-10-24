@@ -1,6 +1,6 @@
 # Py_to_exe_builder
 
-**Py To EXE Builder v0.9.1** — графический сборщик Python-проектов в Windows EXE
+**Py To EXE Builder v0.9.2** — графический сборщик Python-проектов в Windows EXE
 (PyInstaller + PySide6/Qt6).
 
 - Запуск: двойной клик по `py_to_exe_builder.pyw` (PySide6 поставится сам).
