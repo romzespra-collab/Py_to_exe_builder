@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-py_to_exe_builder.pyw  v0.9.2
+py_to_exe_builder.pyw  v0.9.3
 Py To EXE Builder
-Версия: 0.9.2  (PySide6 / Qt6)
+Версия: 0.9.3  (PySide6 / Qt6)
+
+Изменения 0.9.3:
+- 🔄 Обновление с GitHub (gh_update 1.2.0): старый код, которого нет в новой
+  версии, стирается; резервной папки backup больше нет; настройки не трогает.
 
 Изменения 0.9.2:
 - 🔄 Обновление: модуль gh_update 1.1.3 — в облаке анимации значок GitHub над
@@ -341,7 +345,7 @@ Py To EXE Builder
 Автор: RomzesPRA-2026.
 """
 
-APP_VERSION = "0.9.2"
+APP_VERSION = "0.9.3"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 APP_USER_MODEL_ID = "PyToExeBuilder.App"
