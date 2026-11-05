@@ -1,4 +1,4 @@
-py_to_exe_builder  v0.9.6
+py_to_exe_builder  v0.9.7
 ═════════════════════════
 
 Py To EXE Builder — графический сборщик Python-проектов в Windows EXE
@@ -78,6 +78,9 @@ release/py_to_exe_builder_vX.Y.Z.zip из ветки main, ставит пове
 
 ИЗМЕНЕНИЯ
 ─────────
+0.9.7
+• Python 3.12+: код очищен автоправкой ruff (кодировка в шапке), поведение не менялось.
+
 0.9.6
 • Python 3.12+: убрана цель сборки «Windows 7» (portable Python 3.8, пины PySide6==6.1.3 / numpy<1.25, get-pip для 3.8/3.9, Win7-ffmpeg, Win7-сборка с yt-dlp_win7.exe). PySide6 ≥ 6.10.1, gh_update 1.4.1.
 
