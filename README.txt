@@ -1,4 +1,4 @@
-py_to_exe_builder  v0.9.5
+py_to_exe_builder  v0.9.6
 ═════════════════════════
 
 Py To EXE Builder — графический сборщик Python-проектов в Windows EXE
@@ -15,7 +15,7 @@ Py To EXE Builder — графический сборщик Python-проект�
 • Авто-оптимизация: лишние модули Qt исключаются (EXE в 5–10 раз меньше),
   UPX-сжатие, авто-bundle ffmpeg для yt-dlp / moviepy / pydub.
 • Целевая ОС: текущий Python или авто-скачиваемый portable Python
-  под Windows 7 / 10 / 11 (x64 / x86 / ARM64) — в систему ничего не ставится.
+  под Windows 10 / 11 (x64 / x86 / ARM64) — в систему ничего не ставится.
 • 267 встроенных иконок (8 стилей) или своя .ico.
 • Тёмная/светлая тема (☀/☾), своя рамка окна; все поля и опции
   запоминаются сами.
@@ -26,7 +26,7 @@ Py To EXE Builder — графический сборщик Python-проект�
 py_to_exe_builder.pyw   программа целиком (двойной клик — запуск без консоли)
 py_to_exe_builder.spec  настройки PyInstaller: один файл, без консоли, без UPX
 build_exe.bat           сборка EXE одним кликом (с самопроверкой)
-requirements.txt        нужные библиотеки (PySide6>=6.5)
+requirements.txt        нужные библиотеки (PySide6>=6.10.1)
 README.txt              этот файл
 README.md               кратко для GitHub
 CHANGELOG.txt           история версий («Что нового» при обновлении)
@@ -42,7 +42,7 @@ _py_to_exe_builder\    рабочая папка сборки (build/spec, UPX, 
 
 ЗАПУСК
 ──────
-1. Нужен Python 3.10+ (python.org, галка «Add to PATH»).
+1. Нужен Python 3.12+ (python.org, галка «Add to PATH»).
 2. Двойной клик по py_to_exe_builder.pyw.
    Библиотеки (PySide6) поставятся сами при первом запуске — откроется
    окно с ходом установки pip. Если не получится — появится окно
@@ -78,6 +78,9 @@ release/py_to_exe_builder_vX.Y.Z.zip из ветки main, ставит пове
 
 ИЗМЕНЕНИЯ
 ─────────
+0.9.6
+• Python 3.12+: убрана цель сборки «Windows 7» (portable Python 3.8, пины PySide6==6.1.3 / numpy<1.25, get-pip для 3.8/3.9, Win7-ffmpeg, Win7-сборка с yt-dlp_win7.exe). PySide6 ≥ 6.10.1, gh_update 1.4.1.
+
 0.9.5
 • Обновление — только Python: убрано обновление собранного exe (gh_update 1.4.0), GitHub больше не собирает exe.
 

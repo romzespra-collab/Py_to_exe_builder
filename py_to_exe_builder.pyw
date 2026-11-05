@@ -1,8 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-py_to_exe_builder.pyw  v0.9.5
+py_to_exe_builder.pyw  v0.9.6
 Py To EXE Builder
-Версия: 0.9.5  (PySide6 / Qt6)
+Версия: 0.9.6  (PySide6 / Qt6)
+
+Изменения 0.9.6:
+- 🐍 Python 3.12+: убрана цель сборки «Windows 7» в «Целевая ОС» (portable Python 3.8,
+  пины PySide6==6.1.3 / numpy<1.25, get-pip для 3.8/3.9, проверка Win7+ARM64,
+  отключение ffmpeg для Win7, гибридная Win7-сборка с yt-dlp_win7.exe).
+  Остались: текущий Python, Windows 10+ (3.12), Windows 11 (3.13), свой
+  Python. PySide6 ≥ 6.10.1, gh_update 1.4.1 (код модуля очищен автоправкой).
 
 Изменения 0.9.5:
 - 🔄 Обновление — только Python: убрано обновление собранного exe
@@ -354,7 +361,7 @@ Py To EXE Builder
 Автор: RomzesPRA-2026.
 """
 
-APP_VERSION = "0.9.5"
+APP_VERSION = "0.9.6"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 APP_USER_MODEL_ID = "PyToExeBuilder.App"
@@ -388,7 +395,7 @@ APP_ROOT = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", Fals
 
 # ---------------- Авто-установка библиотек (ДО импорта PySide6) ----------------
 # (имя для import, имя для pip)
-REQUIRED = (("PySide6", "PySide6>=6.5"),)
+REQUIRED = (("PySide6", "PySide6>=6.10.1"),)
 
 
 def _console_python():
@@ -3916,12 +3923,6 @@ PORTABLE_PYTHONS = {
         "version": None,
         "note": "Сборка через интерпретатор, в котором запущен сам сборщик.",
     },
-    "win7": {
-        "label": "🖥 Windows 7 / 8 / 8.1  →  Python 3.8.10 (авто-скачать)",
-        "version": "3.8.10",
-        "note": "Python 3.8.10 — последняя версия с поддержкой Windows 7. "
-                "На Win7 целевой ПК должен иметь SP1 + KB2999226 (UCRT).",
-    },
     "win10": {
         "label": "🖥 Windows 10+   →  Python 3.12.10 (авто-скачать)",
         "version": "3.12.10",
@@ -3939,33 +3940,16 @@ PORTABLE_PYTHONS = {
     },
 }
 
+# Режимы «Целевая ОС», в которых Python скачивается сам (embeddable).
+PORTABLE_MODES = tuple(k for k, v in PORTABLE_PYTHONS.items() if v.get("version"))
+
 # Архитектуры Windows для авто-скачиваемого embeddable Python.
 # Суффикс "zip" совпадает с именем файла на python.org:
 #   python-{version}-embed-{zip}.zip
-# "min" — минимальная версия Python, под которую эта архитектура
-# вообще выпускается (arm64 embeddable появился только в 3.11).
 PORTABLE_ARCHES = {
-    "amd64": {"label": "x64 (64-бит, обычный ПК)",        "zip": "amd64", "min": (3, 5)},
-    "win32": {"label": "x86 (32-бит, старые/слабые ПК)",  "zip": "win32", "min": (3, 5)},
-    "arm64": {"label": "ARM64 (планшеты/ноутбуки на ARM)", "zip": "arm64", "min": (3, 11)},
-}
-
-# Версионные ограничения зависимостей для старых Python (Win7 = 3.8).
-# Если в проекте detected эти пакеты — pip install получит пин-версию.
-#
-# Qt 6.2+ официально требует Windows 10. Последний PySide6, который реально
-# работает на Win7 — 6.1.3 (декабрь 2021). PySide6 6.2.x уже падает с
-# «DLL load failed while importing QtCore».
-PY38_PINS = {
-    "PySide6":    "PySide6==6.1.3",       # Последняя версия с поддержкой Win7
-    "PySide2":    "PySide2",              # Qt 5.15 LTS — поддерживает Win7
-    "PyQt6":      "PyQt6<6.2",            # PyQt6 6.2+ тоже требует Win10
-    "PyQt5":      "PyQt5",                # Qt 5 — Win7 OK
-    "shiboken6":  "shiboken6==6.1.3",     # совпадает с PySide6
-    "numpy":      "numpy<1.25",           # 1.25+ требует Python 3.9+
-    "pandas":     "pandas<2.1",           # 2.1+ требует Python 3.9+
-    "scipy":      "scipy<1.11",
-    "matplotlib": "matplotlib<3.8",
+    "amd64": {"label": "x64 (64-бит, обычный ПК)",        "zip": "amd64"},
+    "win32": {"label": "x86 (32-бит, старые/слабые ПК)",  "zip": "win32"},
+    "arm64": {"label": "ARM64 (планшеты/ноутбуки на ARM)", "zip": "arm64"},
 }
 
 # Имена импортов != имена pip-пакетов. Маппинг для корректной установки.
@@ -4087,40 +4071,6 @@ def is_portable_python_ready(version, arch="amd64"):
     if not (pdir / "Lib" / "site-packages" / "pip").is_dir():
         return False
     return True
-
-
-# ----------------- nicolaasjan/yt-dlp (Win7-compat standalone exe) -----------
-
-NICOLAASJAN_REPO = "nicolaasjan/yt-dlp"
-NICOLAASJAN_ASSET = "yt-dlp_win7.exe"
-
-
-def nicolaasjan_cache_dir():
-    """ASCII-папка для кэша скачанного yt-dlp_win7.exe."""
-    base = portable_python_root().parent  # %LOCALAPPDATA%\Py-To-EXE-Builder
-    return base / "nicolaasjan_ytdlp"
-
-
-def nicolaasjan_cached_exe():
-    return nicolaasjan_cache_dir() / NICOLAASJAN_ASSET
-
-
-def nicolaasjan_cached_tag_file():
-    return nicolaasjan_cache_dir() / "release_tag.txt"
-
-
-def read_cached_nicolaasjan_tag():
-    try:
-        return nicolaasjan_cached_tag_file().read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
-
-
-def write_cached_nicolaasjan_tag(tag):
-    try:
-        nicolaasjan_cached_tag_file().write_text(tag, encoding="utf-8")
-    except Exception:
-        pass
 
 
 USER_AGENT = f"Py-To-EXE-Builder/{APP_VERSION}"
@@ -4318,7 +4268,7 @@ class ConvertWorker(QThread):
 
     def _patch_embed_pth(self, pdir, version):
         """Раскомментировать 'import site' и добавить Lib/site-packages в python3X._pth."""
-        # Имя файла: python38._pth, python311._pth, python313._pth
+        # Имя файла: python312._pth, python313._pth
         major_minor = "".join(version.split(".")[:2])
         pth = pdir / f"python{major_minor}._pth"
         if not pth.exists():
@@ -4347,17 +4297,6 @@ class ConvertWorker(QThread):
         arch_spec = PORTABLE_ARCHES.get(arch)
         if not arch_spec:
             self.log.emit(f"❌ Неизвестная архитектура: {arch}")
-            return None
-        try:
-            mm = tuple(int(x) for x in version.split(".")[:2])
-        except Exception:
-            mm = (0, 0)
-        if mm < arch_spec["min"]:
-            self.log.emit(
-                f"❌ Python {version} не выпускается под {arch} "
-                f"(нужен ≥ {arch_spec['min'][0]}.{arch_spec['min'][1]}). "
-                f"Выбери x64/x86 или более новую целевую ОС (Win10/11)."
-            )
             return None
 
         host = platform.machine().lower()
@@ -4408,13 +4347,7 @@ class ConvertWorker(QThread):
 
         # 3. get-pip.py
         if not (pdir / "Lib" / "site-packages" / "pip").is_dir():
-            # Главный bootstrap (https://bootstrap.pypa.io/get-pip.py) только для 3.10+.
-            # Для 3.8/3.9 — версионный URL: https://bootstrap.pypa.io/pip/3.8/get-pip.py
-            major_minor_tuple = tuple(int(x) for x in version.split(".")[:2])
-            if major_minor_tuple < (3, 10):
-                getpip_url = f"https://bootstrap.pypa.io/pip/{major_minor_tuple[0]}.{major_minor_tuple[1]}/get-pip.py"
-            else:
-                getpip_url = "https://bootstrap.pypa.io/get-pip.py"
+            getpip_url = "https://bootstrap.pypa.io/get-pip.py"
             gp_path = pdir / "get-pip.py"
             self.log.emit(f"⬇ Скачивание get-pip.py: {getpip_url}")
             try:
@@ -4435,14 +4368,11 @@ class ConvertWorker(QThread):
 
         return str(pexe)
 
-    def _resolve_build_pins(self, py_version_tuple, dep_names):
+    def _resolve_build_pins(self, dep_names):
         """Превращает import-имена в pip-спецификаторы:
         - выкидывает denylist / stdlib C-extensions;
-        - применяет алиас import→pip (PIL→Pillow и т.п.);
-        - применяет пин-версию для старых Python (PySide6==6.1.3 и т.п.).
+        - применяет алиас import→pip (PIL→Pillow и т.п.).
         Возвращает список pip-спецификаторов."""
-        major, minor = py_version_tuple[:2]
-        pins = PY38_PINS if (major, minor) <= (3, 8) else {}
         result = []
         seen_pkg = set()  # дедупликация (несколько win32* → один pywin32)
         skipped = []
@@ -4454,13 +4384,7 @@ class ConvertWorker(QThread):
             if pkg in seen_pkg:
                 continue
             seen_pkg.add(pkg)
-            # Если в пинах указано имя ИМПОРТА — берём пин-спецификатор
-            if name in pins:
-                result.append(pins[name])
-            elif pkg in pins:
-                result.append(pins[pkg])
-            else:
-                result.append(pkg)
+            result.append(pkg)
         return result, skipped
 
     def _install_project_deps(self, py_exe, workspace_dir):
@@ -4481,13 +4405,9 @@ class ConvertWorker(QThread):
         if not info["ok"]:
             self.log.emit(f"❌ Python не отвечает: {info['error']}")
             return False
-        try:
-            ver_tuple = tuple(int(x) for x in info["version"].split("."))
-        except Exception:
-            ver_tuple = (3, 8, 0)
 
-        portable = self.p.get("python_mode") in ("win7", "win10", "win11")
-        specs_all, skipped = self._resolve_build_pins(ver_tuple, names)
+        portable = self.p.get("python_mode") in PORTABLE_MODES
+        specs_all, skipped = self._resolve_build_pins(names)
         dep_hash = hashlib.sha256("\n".join([str(py_exe)] + sorted(specs_all)).encode("utf-8")).hexdigest()
         hash_file = Path(workspace_dir) / "deps_hash.txt"
         try:
@@ -4502,23 +4422,15 @@ class ConvertWorker(QThread):
         self.stage.emit("Установка зависимостей...")
         self.log.emit(f"🐍 Python {info['version']} ({info['arch']})")
 
-        # Логируем алиасы и пины.
+        # Логируем алиасы.
         alias_msgs = []
-        pin_msgs = []
         for orig in names:
             pkg = import_to_pip_name(orig)
-            pinned = (PY38_PINS.get(orig) or PY38_PINS.get(pkg)) if ver_tuple[:2] <= (3, 8) else None
             if pkg != orig:
                 alias_msgs.append(f"{orig} → {pkg}")
-            if pinned and pinned != pkg and pinned != orig:
-                pin_msgs.append(f"{orig} → {pinned}")
         if alias_msgs:
             self.log.emit(f"  🔀 Алиасы import→pip: {', '.join(alias_msgs[:8])}"
                           + (f", +{len(alias_msgs) - 8}..." if len(alias_msgs) > 8 else ""))
-        if pin_msgs:
-            self.log.emit(f"  📌 Пин-версии для Python {info['version']}: {', '.join(pin_msgs)}")
-            self.log.emit("  ℹ Для запуска на Windows 7 нужны старые версии библиотек "
-                          "(Qt 6.2+ официально требует Win10).")
 
         missing = missing_imports_external(py_exe, names)
         if not missing:
@@ -4528,7 +4440,7 @@ class ConvertWorker(QThread):
             except Exception:
                 pass
             return True
-        specs, _ = self._resolve_build_pins(ver_tuple, missing)
+        specs, _ = self._resolve_build_pins(missing)
         self.log.emit(f"📦 Импортов: {len(names)}, отсутствует: {len(missing)}, к установке: {len(specs)}")
 
         if portable:
@@ -4561,81 +4473,6 @@ class ConvertWorker(QThread):
                 pass
         self.log.emit("✓ Зависимости готовы")
         return True
-
-    def _ensure_nicolaasjan_ytdlp(self):
-        """Качает (или берёт из кэша) свежий yt-dlp_win7.exe от nicolaasjan/yt-dlp.
-        Возвращает путь к exe или None при ошибке."""
-        cache_dir = nicolaasjan_cache_dir()
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cached_exe = nicolaasjan_cached_exe()
-
-        self.log.emit("")
-        self.log.emit("=== Win7-режим: подготовка yt-dlp_win7.exe (nicolaasjan/yt-dlp) ===")
-
-        # 1. Запрос GitHub API: получить tag и URL свежего ассета.
-        api_url = f"https://api.github.com/repos/{NICOLAASJAN_REPO}/releases/latest"
-        latest_tag = ""
-        asset_url = ""
-        try:
-            req = urllib.request.Request(
-                api_url,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Accept": "application/vnd.github+json",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            latest_tag = (data.get("tag_name") or "").strip()
-            for asset in data.get("assets") or []:
-                if asset.get("name") == NICOLAASJAN_ASSET:
-                    asset_url = asset.get("browser_download_url") or ""
-                    break
-            if not asset_url:
-                self.log.emit(f"⚠ {NICOLAASJAN_ASSET} не найден в последнем релизе. "
-                              f"Использую кэш если есть.")
-        except Exception as exc:
-            self.log.emit(f"⚠ GitHub API недоступен: {exc}. Использую кэш если есть.")
-
-        cached_tag = read_cached_nicolaasjan_tag()
-
-        # 2. Если кэш свежий — используем без скачивания.
-        if cached_exe.is_file() and cached_tag and cached_tag == latest_tag:
-            self.log.emit(f"📦 yt-dlp_win7.exe (cached, tag={cached_tag}): {cached_exe}")
-            return str(cached_exe)
-
-        # 3. Если нечего скачать (API не ответил) и кэш есть — используем старый.
-        if not asset_url:
-            if cached_exe.is_file():
-                self.log.emit(f"📦 yt-dlp_win7.exe (cached, tag={cached_tag or '?'}): {cached_exe}")
-                return str(cached_exe)
-            self.log.emit("❌ Не удалось получить ни свежий, ни кэшированный yt-dlp_win7.exe.")
-            return None
-
-        # 4. Скачиваем свежую версию.
-        self.log.emit(f"⬇ Скачивание {NICOLAASJAN_ASSET} (tag={latest_tag}): {asset_url}")
-        tmp_path = cache_dir / f"{NICOLAASJAN_ASSET}.part"
-        try:
-            self._download_with_progress(asset_url, tmp_path, NICOLAASJAN_ASSET)
-        except Exception as exc:
-            self.log.emit(f"❌ Не удалось скачать: {exc}")
-            if cached_exe.is_file():
-                self.log.emit(f"📦 Использую старый кэш: {cached_exe}")
-                return str(cached_exe)
-            return None
-
-        try:
-            if cached_exe.exists():
-                cached_exe.unlink()
-            tmp_path.rename(cached_exe)
-            write_cached_nicolaasjan_tag(latest_tag)
-        except Exception as exc:
-            self.log.emit(f"❌ Не удалось сохранить exe: {exc}")
-            return None
-
-        size_mb = cached_exe.stat().st_size / 1024 / 1024
-        self.log.emit(f"  ✓ Готово: {cached_exe} ({size_mb:.1f} MB)")
-        return str(cached_exe)
 
     def _resolve_build_python(self):
         """Возвращает путь к python.exe для сборки. None при ошибке."""
@@ -4735,16 +4572,10 @@ class ConvertWorker(QThread):
             output_dir = Path(self.p["output_dir"])
             app_name = self.p["app_name"]
 
-            # Win7-режим: добавляем суффикс _win7 к имени и качаем bundled yt-dlp_win7.exe.
-            is_win7_mode = (self.p.get("python_mode") == "win7")
-            if is_win7_mode and not app_name.endswith("_win7"):
-                app_name = f"{app_name}_win7"
-                self.log.emit(f"🖥 Win7-режим: имя exe → {app_name}.exe")
-
             # Арх-суффикс для авто-скачиваемых Python (кроме amd64), чтобы
             # x86/ARM64-сборка не затирала x64-версию в той же папке вывода.
             build_arch = (self.p.get("build_arch") or "amd64").strip()
-            if self.p.get("python_mode") in ("win7", "win10", "win11") and build_arch != "amd64":
+            if self.p.get("python_mode") in PORTABLE_MODES and build_arch != "amd64":
                 arch_tag = "_x86" if build_arch == "win32" else f"_{build_arch}"
                 if not app_name.endswith(arch_tag):
                     app_name = f"{app_name}{arch_tag}"
@@ -4761,7 +4592,7 @@ class ConvertWorker(QThread):
                 return
 
             # ------- tkinter-пререквизит: проверяем целевой Python ЗАРАНЕЕ -------
-            # embeddable/portable Python (режимы win7/win10/win11) идёт БЕЗ
+            # embeddable/portable Python (режимы win10/win11) идёт БЕЗ
             # tkinter/tcl/tk — тогда никакой --collect-all не спасёт. Предупреждаем
             # до сборки, а не после её падения.
             if self.p.get("uses_tkinter"):
@@ -4770,7 +4601,7 @@ class ConvertWorker(QThread):
                     self.log.emit("")
                     self.log.emit("⚠ ВНИМАНИЕ: проект использует tkinter, но в выбранном Python "
                                   "нет модуля _tkinter (tcl/tk).")
-                    self.log.emit("   Embeddable/portable Python (режимы win7/win10/win11) идёт БЕЗ "
+                    self.log.emit("   Embeddable/portable Python (режимы win10/win11) идёт БЕЗ "
                                   "tkinter. Для tkinter-приложения выбери обычный установленный "
                                   "Python («Текущий Python» или путь к полному python.exe).")
                     self.log.emit("   Иначе готовый exe упадёт с «No module named tkinter» несмотря "
@@ -4799,7 +4630,7 @@ class ConvertWorker(QThread):
                 self._site_shim_dir = self._write_subprocess_hide_shim(workspace_dir)
                 # embeddable Python (._pth) игнорирует PYTHONPATH — кладём шим
                 # прямо в его site-packages (только если там нет чужого sitecustomize).
-                if self.p.get("python_mode") in ("win7", "win10", "win11"):
+                if self.p.get("python_mode") in PORTABLE_MODES:
                     sp_shim = Path(build_python).parent / "Lib" / "site-packages" / "sitecustomize.py"
                     try:
                         if (not sp_shim.exists()
@@ -4839,17 +4670,6 @@ class ConvertWorker(QThread):
             debug_mode = bool(self.p.get("debug_mode"))
             bundle_ffmpeg = bool(self.p.get("bundle_ffmpeg"))
 
-            # В Win7-режиме НЕ бандлим ffmpeg: современные сборки крашатся
-            # с 0xc0000005 на CPU без SSE4.1/AVX (Celeron T-серии и т.п.).
-            # Пусть лучше не будет ffmpeg, чем popup-ошибка при каждом запуске.
-            if is_win7_mode and bundle_ffmpeg:
-                self.log.emit("")
-                self.log.emit("🚫 Win7-режим: bundle ffmpeg ОТКЛЮЧЕН (современный ffmpeg крашится "
-                              "на старых CPU без SSE4.1/AVX).")
-                self.log.emit("   Если нужен MP3-экстракт — положи Win7-совместимый ffmpeg.exe "
-                              "рядом с готовым EXE вручную.")
-                bundle_ffmpeg = False
-
             onefile = self.p["onefile"] or max_compat or auto_opt or universal
             collect_all = self.p["collect_all"] or max_compat
             # Отладочный режим: НЕ windowed, чтобы видеть консоль и stdout/stderr.
@@ -4871,7 +4691,7 @@ class ConvertWorker(QThread):
 
             # ------- Универсальный режим: VC++ runtime DLLs -------
             if universal:
-                if self.p.get("python_mode") in ("win7", "win10", "win11"):
+                if self.p.get("python_mode") in PORTABLE_MODES:
                     target_arch = build_arch
                 else:
                     target_arch = "win32" if self._pyinfo(build_python).get("arch") == "32-bit" else "amd64"
@@ -4929,22 +4749,6 @@ class ConvertWorker(QThread):
                         self.log.emit(f"   + {Path(fp).name}  ←  {fp}")
                 else:
                     self.log.emit("⚠ ffmpeg.exe не найден в PATH. Скачай и положи рядом с проектом или укажи путь.")
-
-            # ------- Win7-режим: bundle yt-dlp_win7.exe (nicolaasjan) -------
-            uses_ytdlp = "yt_dlp" in set(self.p.get("third") or []) | set(self.p.get("unknown") or [])
-            if is_win7_mode and uses_ytdlp:
-                ytdlp_exe = self._ensure_nicolaasjan_ytdlp()
-                if ytdlp_exe:
-                    cmd.extend(["--add-binary", f"{ytdlp_exe};."])
-                    self.log.emit(f"🖥 Bundle yt-dlp_win7.exe → внутрь EXE: {ytdlp_exe}")
-                    self.log.emit("   Приложение найдёт его через sys._MEIPASS и будет вызывать как subprocess.")
-                    # Также НЕ нужно ставить упоминание UPX-исключения через подстановку —
-                    # bundled exe не пакуется UPX (большой и сжат уже).
-                    cmd.extend(["--upx-exclude", "yt-dlp_win7.exe"])
-                    cmd.extend(["--upx-exclude", "yt-dlp.exe"])
-                else:
-                    self.log.emit("⚠ yt-dlp_win7.exe не получен. Win7-сборка пройдёт, но без актуального yt-dlp — "
-                                  "Win7 не сможет качать с YouTube.")
 
             # ------- Crash logger runtime hook -------
             if universal or debug_mode:
@@ -6282,7 +6086,7 @@ class ExeBuilderWindow(QMainWindow):
             "• Универсальный EXE: bundle VC++ Runtime + crash-logger.\n"
             "• Авто-оптимизация: исключение неиспользуемых Qt-модулей (5–10× меньше размер).\n"
             "• Авто-bundle ffmpeg: если в проекте используется yt-dlp / moviepy и т.п.\n"
-            "Готовый exe запускается на ЛЮБОМ ПК с Windows 7/10/11 без установки чего-либо."
+            "Готовый exe запускается на ЛЮБОМ ПК с Windows 10/11 без установки чего-либо."
         )
         self.convert_btn.clicked.connect(self.start_convert)
         go.addWidget(self.convert_btn, 1)
@@ -6393,7 +6197,7 @@ class ExeBuilderWindow(QMainWindow):
         for akey, aspec in PORTABLE_ARCHES.items():
             self.arch_combo.addItem(aspec["label"], userData=akey)
         self.arch_combo.setToolTip(
-            "Архитектура авто-скачиваемого Python (только режимы Windows 7/10/11).\n"
+            "Архитектура авто-скачиваемого Python (только режимы Windows 10/11).\n"
             "x64 — обычные ПК. x86 — 32-битные/старые. ARM64 — устройства на ARM.\n"
             "Для «Текущий»/«Свой Python» игнорируется (берётся арх. того интерпретатора)."
         )
@@ -7097,7 +6901,7 @@ class ExeBuilderWindow(QMainWindow):
         self.write_log("  2. Нажми «🚀 Сделать EXE».")
         self.write_log("")
         self.write_log("Конвертор сам всё сделает:")
-        self.write_log("  🌍 bundle VC++ Runtime → запустится на ЛЮБОМ ПК (Win 7/10/11) без установки;")
+        self.write_log("  🌍 bundle VC++ Runtime → запустится на ЛЮБОМ ПК (Win 10/11) без установки;")
         self.write_log("  ⚡ Авто-оптимизация → exe в 5–10× меньше за счёт исключения ненужных модулей;")
         self.write_log("  🗜 UPX-сжатие → exe ещё в 1.5–2× меньше (авто-скачивается);")
         self.write_log("  📦 Авто-bundle ffmpeg → если проект использует yt-dlp / moviepy / pydub и т.п.;")
@@ -7264,7 +7068,7 @@ class ExeBuilderWindow(QMainWindow):
         self.python_exe_edit.setVisible(is_custom)
         self.python_browse_btn.setVisible(is_custom)
         # Выбор архитектуры имеет смысл только для авто-скачиваемых Python.
-        self.arch_combo.setEnabled(mode in ("win7", "win10", "win11"))
+        self.arch_combo.setEnabled(mode in PORTABLE_MODES)
         self._refresh_python_info()
 
     def _choose_python_exe(self):
