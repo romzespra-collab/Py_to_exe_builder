@@ -2,10 +2,10 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-title Сборка py_to_exe_builder v0.9.5
+title Сборка py_to_exe_builder v0.9.6
 
 rem ============================================================
-rem  build_exe.bat  v0.9.5 — сборка py_to_exe_builder.exe
+rem  build_exe.bat  v0.9.6 — сборка py_to_exe_builder.exe
 rem  Результат: dist\py_to_exe_builder.exe
 rem ============================================================
 
@@ -16,7 +16,7 @@ python --version >nul 2>nul
 if errorlevel 1 set "PY=py -3"
 %PY% --version
 if errorlevel 1 (
-    echo ОШИБКА: Python не найден. Установи Python 3.10+ с python.org, галка "Add to PATH".
+    echo ОШИБКА: Python не найден. Установи Python 3.12+ с python.org, галка "Add to PATH".
     pause & exit /b 1
 )
 
