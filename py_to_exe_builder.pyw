@@ -1,8 +1,10 @@
-# -*- coding: utf-8 -*-
 """
-py_to_exe_builder.pyw  v0.9.6
+py_to_exe_builder.pyw  v0.9.7
 Py To EXE Builder
-Версия: 0.9.6  (PySide6 / Qt6)
+Версия: 0.9.7  (PySide6 / Qt6)
+
+Изменения 0.9.7:
+- 🧹 Python 3.12+: код очищен автоправкой ruff (кодировка в шапке), поведение не менялось.
 
 Изменения 0.9.6:
 - 🐍 Python 3.12+: убрана цель сборки «Windows 7» в «Целевая ОС» (portable Python 3.8,
@@ -361,7 +363,7 @@ Py To EXE Builder
 Автор: RomzesPRA-2026.
 """
 
-APP_VERSION = "0.9.6"
+APP_VERSION = "0.9.7"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 APP_USER_MODEL_ID = "PyToExeBuilder.App"
