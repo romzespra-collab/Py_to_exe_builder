@@ -1,10 +1,65 @@
 # Py_to_exe_builder
 
-**Py To EXE Builder v0.9.8** — графический сборщик Python-проектов в Windows EXE
-(PyInstaller + PySide6/Qt6).
+**Py To EXE Builder** — графический сборщик Python-проектов в Windows EXE
+(PyInstaller + PySide6/Qt6). Автор: RomzesPRA-2026.
 
-- Запуск: двойной клик по `py_to_exe_builder.pyw` (PySide6 поставится сам).
-- Сборка в EXE: `build_exe.bat` → `dist\py_to_exe_builder.exe`.
-- Самопроверка: `python py_to_exe_builder.pyw --selftest`.
+## Что делает
 
-Подробное описание, структура и список изменений — в [README.txt](README.txt).
+- Перетаскиваешь главный `.py`/`.pyw` (или папку проекта) в окно и жмёшь
+  «🚀 Сделать EXE» — остальное сборщик делает сам.
+- Анализирует импорты проекта: всего / сторонние / неизвестные (плитки в
+  шапке), пишет `requirements_detected.txt` и отчёт.
+- Универсальный EXE: VC++ Runtime внутри + журнал падений
+  (`<имя>_crash.log`).
+- Авто-оптимизация: лишние модули Qt исключаются (EXE в 5–10 раз меньше),
+  UPX-сжатие, ffmpeg кладётся сам для yt-dlp / moviepy / pydub.
+- Целевая ОС: текущий Python, установленные на ПК Python или скачиваемый
+  portable Python под Windows 10 / 11 (x64 / x86 / ARM64) — в систему ничего
+  не ставится.
+- 267 встроенных иконок (8 стилей) или своя `.ico`.
+- Тёмная/светлая тема (☀/☾), своя рамка окна; все поля и опции запоминаются
+  сами, кнопка «Стоп» прерывает сборку.
+
+Рядом с собираемым проектом сборщик создаёт папки `EXE_Output\` (готовый EXE,
+`requirements_detected.txt`, отчёт анализа) и `_py_to_exe_builder\` (рабочая
+папка сборки: build/spec, UPX, кэш).
+
+## Запуск
+
+1. Нужен Python 3.12+ (python.org, галка «Add to PATH»).
+2. Двойной клик по `py_to_exe_builder.pyw`. PySide6 поставится сам при первом
+   запуске (окно с ходом установки pip); не получится — появится окно с
+   командой для ручной установки.
+
+Самопроверка без окна: `python py_to_exe_builder.pyw --selftest` — итог в
+консоли и в `selftest.txt`, код возврата 0/1.
+
+## Обновление с GitHub
+
+Меню ⋯ → «🔄 Обновление с GitHub…». Нужен токен GitHub «только чтение»
+(fine-grained, репозиторий Py_to_exe_builder, Contents: Read-only) — как его
+получить, показывает кнопка «?». Проверка сама — через 30 с после запуска и
+дальше каждые 12 ч (можно поменять); нашлась новая версия — в шапке кнопка
+«⬆ X.Y.Z», «Что нового» — из `CHANGELOG.txt`. «Обновить до …» скачивает
+`release/py_to_exe_builder_vX.Y.Z.zip` из ветки main, ставит поверх и
+перезапускает программу; настройки не трогаются. Обновляется только программа
+на Python; собранный EXE сам не обновляется.
+
+## Сборка в EXE
+
+Двойной клик по `build_exe.bat`: проверка Python → `pip install -r
+requirements.txt` + PyInstaller → сборка по `py_to_exe_builder.spec` →
+`dist\py_to_exe_builder.exe --selftest` (ошибка — сборка остановится).
+Готовый файл: `dist\py_to_exe_builder.exe`.
+
+## Файлы
+
+| Файл | Что это |
+|---|---|
+| `py_to_exe_builder.pyw` | программа целиком (двойной клик — запуск без консоли) |
+| `py_to_exe_builder.spec` | настройки PyInstaller: один файл, без консоли, без UPX |
+| `build_exe.bat` | сборка EXE одним кликом (с самопроверкой) |
+| `requirements.txt` | нужные библиотеки (PySide6) |
+| `CHANGELOG.txt` | журнал изменений («Что нового» при обновлении) |
+| `gh_update.py`, `gh_update_qt.py`, `gh_update_help.py` | обновление с GitHub (общий модуль) |
+| `test_gh_update.pyw` | тесты модуля обновления без сети |
