@@ -2,10 +2,10 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-title Сборка py_to_exe_builder v0.9.8
+title Сборка py_to_exe_builder v0.9.9
 
 rem ============================================================
-rem  build_exe.bat  v0.9.8 — сборка py_to_exe_builder.exe
+rem  build_exe.bat  v0.9.9 — сборка py_to_exe_builder.exe
 rem  Результат: dist\py_to_exe_builder.exe
 rem ============================================================
 
