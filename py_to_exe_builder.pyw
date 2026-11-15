@@ -1,7 +1,13 @@
 """
-py_to_exe_builder.pyw  v0.9.9
+py_to_exe_builder.pyw  v0.9.10
 Py To EXE Builder
-Версия: 0.9.9  (PySide6 / Qt6)
+Версия: 0.9.10  (PySide6 / Qt6)
+
+Изменения 0.9.10:
+- 🔄 Обновление с GitHub: общий модуль gh_update 1.5.3 (один на все программы):
+  неполный архив не ставится; копия из git не обновляется (в ней — git pull);
+  после скачивания ещё раз проверяется, можно ли ставить; скачивание при выходе
+  бросается; кривой токен не попадает в журнал.
 
 Изменения 0.9.9:
 - 🧹 Порядок: журнал — последние 10 версий (CHANGELOG.txt и эта шапка); одно описание
@@ -52,7 +58,7 @@ Py To EXE Builder
 Более ранние версии — в истории git.
 """
 
-APP_VERSION = "0.9.9"
+APP_VERSION = "0.9.10"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 APP_USER_MODEL_ID = "PyToExeBuilder.App"
