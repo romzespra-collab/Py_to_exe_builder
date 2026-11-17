@@ -7,3 +7,7 @@ config.json
 *.zip
 !release/*.zip
 backup/
+app_icon.json
+app_icon.json.bak
+app_icon_cache.json
+/py_to_exe_builder.ico

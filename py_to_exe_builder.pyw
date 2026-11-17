@@ -1,7 +1,14 @@
 """
-py_to_exe_builder.pyw  v0.9.10
+py_to_exe_builder.pyw  v0.10.0
 Py To EXE Builder
-Версия: 0.9.10  (PySide6 / Qt6)
+Версия: 0.10.0  (PySide6 / Qt6)
+
+Изменения 0.10.0:
+- 🖼 Значок программы: окно выбора (общий модуль app_icon 1.2.0) — меню ⋯ →
+  «🖼  Значок программы…»; встроенная база ~370 значков, поиск в интернете, своя
+  картинка; .ico и ярлыки. «По умолчанию» — родной значок. Выбрали — значок окна,
+  панели задач и полосы заголовка; не выбирали — всё как раньше. Самопроверка —
+  пункт «значок программы (app_icon)».
 
 Изменения 0.9.10:
 - 🔄 Обновление с GitHub: общий модуль gh_update 1.5.3 (один на все программы):
@@ -50,15 +57,10 @@ Py To EXE Builder
 - 🔄 Обновление: модуль gh_update 1.1.3 — в облаке анимации значок GitHub над
   надписью; архив докачивается при обрыве.
 
-Изменения 0.9.1:
-- 🔄 Обновление модуля gh_update 1.1.1: «Что нового» из журнала проекта
-  (CHANGELOG.txt); инструкция «Как получить токен» показывает настоящий
-  файл с версией; кнопка автопроверки — в цветах темы.
-
 Более ранние версии — в истории git.
 """
 
-APP_VERSION = "0.9.10"
+APP_VERSION = "0.10.0"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 APP_USER_MODEL_ID = "PyToExeBuilder.App"
@@ -215,6 +217,9 @@ from PySide6.QtWidgets import (
     QStyleFactory, QMenu, QToolButton, QProgressBar, QStyle, QLayout, QSizePolicy,
     QStyleOptionButton,
 )
+
+import app_icon          # 0.10.0: общий модуль «Значок программы» (окно выбора — app_icon_qt)
+import app_icon_qt
 
 
 # Диалоги выбора файлов — Qt-шные (не системные), чтобы были в цветах темы.
@@ -5098,6 +5103,21 @@ def make_app_icon():
     return icon
 
 
+def icon_chosen():
+    """Пользователь выбирал значок (окно «Значок программы»): есть app_icon.json или его .bak."""
+    cfg = APP_ROOT / app_icon.CONFIG_NAME
+    return cfg.exists() or cfg.with_name(cfg.name + ".bak").exists()
+
+
+def make_icons():
+    """Значок программы (общий модуль app_icon): выбор в app_icon.json, py_to_exe_builder.ico —
+    рядом с программой. «По умолчанию» — родной значок. Создавать после QApplication."""
+    target = sys.executable if getattr(sys, "frozen", False) else APP_ROOT / "py_to_exe_builder.pyw"
+    native = app_icon_pixmap(256).toImage()
+    return app_icon.AppIcon("py_to_exe_builder", APP_ROOT, title=APP_NAME, target=target,
+                            default={"kind": "image", "png": app_icon.image_to_png(native), "bg": False})
+
+
 # ----------------------- Windows: таскбар и DWM-заголовки -----------------------
 def set_app_user_model_id():
     """Своя группа в таскбаре Windows (иначе иконка — от python.exe)."""
@@ -6057,7 +6077,7 @@ class ExeBuilderWindow(QMainWindow):
         self.more_btn.setText("⋯")
         self.more_btn.setFixedSize(36, 36)
         mf = self.more_btn.font(); mf.setPointSize(14); mf.setBold(True); self.more_btn.setFont(mf)
-        self.more_btn.setToolTip("Меню: о программе, папка workspace, стиль, сброс настроек")
+        self.more_btn.setToolTip("Меню: о программе, папка workspace, стиль, значок программы, сброс настроек")
         self.more_btn.setCursor(Qt.PointingHandCursor)
         self.more_btn.setPopupMode(QToolButton.InstantPopup)
         self.more_menu = self._build_more_menu()
@@ -6078,11 +6098,32 @@ class ExeBuilderWindow(QMainWindow):
         style_menu = self._build_style_menu()
         style_menu.setTitle("🎨  Стиль оформления")
         menu.addMenu(style_menu)
+        act = QAction("🖼  Значок программы…", self)
+        act.triggered.connect(self.show_icon_dialog)
+        menu.addAction(act)
         menu.addSeparator()
         act = QAction("♻  Сбросить настройки", self)
         act.triggered.connect(self.reset_settings)
         menu.addAction(act)
         return menu
+
+    # ---------- Значок программы (общий модуль app_icon, 0.10.0) ----------
+    @property
+    def icons(self):
+        """Значок программы; один объект на приложение (app.app_icons)."""
+        app = QApplication.instance()
+        if getattr(app, "app_icons", None) is None:
+            app.app_icons = make_icons()
+        return app.app_icons
+
+    def show_icon_dialog(self):
+        def applied(qicon):
+            app_icon_qt.apply_everywhere(qicon)
+            self.title_bar.set_icon(qicon)      # полоса своей рамки держит картинку значка
+            self.write_log("🎨 Значок программы изменён")
+        dlg = app_icon_qt.IconDialog(self.icons, self, on_apply=applied)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.exec()
 
     def _set_chip(self, state, text=None):
         self._chip_state = state
@@ -7737,6 +7778,16 @@ def run_selftest():
         return "плитки и чип статуса"
     check("шапка", _header)
 
+    def _app_icon():
+        errs = app_icon.selftest()
+        assert not errs, "; ".join(errs[:3])
+        dlg = app_icon_qt.IconDialog(app_icon.AppIcon("py_to_exe_builder", tmp / "icon", title=APP_NAME),
+                                     holder["win"])
+        dlg.close()
+        dlg.deleteLater()
+        return f"app_icon {app_icon.VERSION}, окно выбора собирается"
+    check("значок программы (app_icon)", _app_icon)
+
     win = holder.get("win")
     if win is not None:
         win._save_timer.stop()
@@ -7763,6 +7814,13 @@ def main():
             gh_update.drop_leftovers(str(APP_ROOT), gone=("README.txt",))
         except Exception:
             pass
+    if icon_chosen():   # 0.10.0: свой значок — окну и полосе заголовка; .ico под выбор
+        try:
+            app.app_icons = make_icons()
+            app.app_icons.ensure()
+            app.setWindowIcon(app.app_icons.icon())
+        except Exception as exc:
+            print(f"Значок программы: {exc}", file=sys.stderr)
     default_style_name = app.style().objectName() if app.style() else ""
     default_palette = QPalette(app.palette())
     win = ExeBuilderWindow(app, default_style_name, default_palette)
