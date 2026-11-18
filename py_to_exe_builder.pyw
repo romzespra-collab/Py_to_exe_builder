@@ -1,7 +1,13 @@
 """
-py_to_exe_builder.pyw  v0.11.0
+py_to_exe_builder.pyw  v0.12.0
 Py To EXE Builder
-Версия: 0.11.0  (PySide6 / Qt6)
+Версия: 0.12.0  (PySide6 / Qt6)
+
+Изменения 0.12.0:
+- 🧩 Общие модули: qt_base 1.0.0 — тема, палитра, значок на панели задач, полоса диалогов
+  (свои DwmThemer / dwm_style_window убраны; палитры Modern и цветовые — с нуля, цвета по
+  ролям прежние; стиль — по теме, как было). Вид прежний (снимки до / после совпадают во
+  всех 13 темах). Числовых полей нет — int_field не нужен.
 
 Изменения 0.11.0:
 - 🧩 Общие модули: safe_json 1.1.1 (надёжная запись JSON; настройки — по-прежнему QSettings) и
@@ -56,14 +62,10 @@ Py To EXE Builder
   понятная ошибка, при сбое замены не остаётся *.upd, свои файлы пользователя
   не стираются, та же версия после установки не предлагается снова).
 
-Изменения 0.9.3:
-- 🔄 Обновление с GitHub (gh_update 1.2.0): старый код, которого нет в новой
-  версии, стирается; резервной папки backup больше нет; настройки не трогает.
-
 Более ранние версии — в истории git.
 """
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.12.0"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 APP_USER_MODEL_ID = "PyToExeBuilder.App"
@@ -205,7 +207,7 @@ def ensure_packages():
 ensure_packages()
 
 from PySide6.QtCore import (
-    Qt, QThread, Signal, QSettings, QSize, QRect, QPoint, QTimer, QEvent, QObject, QRectF,
+    Qt, QThread, Signal, QSettings, QSize, QRect, QPoint, QTimer, QEvent, QRectF,
     QPointF,
 )
 from PySide6.QtGui import (
@@ -225,6 +227,7 @@ import app_icon          # 0.10.0: общий модуль «Значок про
 import app_icon_qt
 import app_log           # 0.11.0: общий модуль журнала: след падений — в py_to_exe_builder_crash.log
 import safe_json         # 0.11.0: общий модуль надёжной записи JSON (настройки — QSettings, им не нужен)
+import qt_base           # 0.12.0: общий модуль основы окна: палитра, значок на панели задач, полоса диалогов
 
 
 # Диалоги выбора файлов — Qt-шные (не системные), чтобы были в цветах темы.
@@ -512,24 +515,37 @@ QScrollBar::handle:horizontal {{ background: {c['input_border']}; border-radius:
 
 
 def _modern_palette(c):
-    """QPalette из цветов темы: и Qt-диалоги, и всё, что не покрыто QSS,
-    получают правильные цвета (никаких белых окон в тёмной теме)."""
-    pal = QPalette()
-    for role, key in (("Window", "bg"), ("WindowText", "text"), ("Base", "input"),
-                      ("AlternateBase", "card"), ("Text", "text"), ("Button", "chip"),
-                      ("ButtonText", "text"), ("ToolTipBase", "card"), ("ToolTipText", "text"),
-                      ("PlaceholderText", "mute"), ("Highlight", "accent"), ("Link", "accent"),
-                      ("BrightText", "err"), ("Mid", "border"), ("Dark", "input_border"),
-                      ("Midlight", "hover"), ("Light", "hover")):
-        pal.setColor(getattr(QPalette.ColorRole, role), QColor(c[key]))
-    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-    pal.setColor(QPalette.ColorRole.Shadow, QColor(_mix(c["bg"], "#000000", 0.5)))
+    """QPalette из цветов темы (общий модуль qt_base, с нуля): и Qt-диалоги, и всё, что не покрыто QSS,
+    получают правильные цвета (никаких белых окон в тёмной теме). Цвета по ролям — прежние."""
+    pal = qt_base.make_palette(
+        window=c["bg"], text=c["text"], base=c["input"], alt_base=c["card"], button=c["chip"],
+        button_text=c["text"], tooltip_base=c["card"], tooltip_text=c["text"], placeholder=c["mute"],
+        highlight=c["accent"], highlighted_text="#ffffff", link=c["accent"], bright_text=c["err"],
+        mid=c["border"], dark=c["input_border"], midlight=c["hover"], light=c["hover"],
+        shadow=_mix(c["bg"], "#000000", 0.5), muted=c["mute"], disabled_base=c["input"],
+        disabled_highlight=c["border"])
     muted = QColor(c["mute"])
-    for role in ("WindowText", "Text", "ButtonText", "PlaceholderText", "HighlightedText",
-                 "ToolTipText", "BrightText", "Link"):
+    for role in ("HighlightedText", "ToolTipText", "BrightText", "Link"):   # недоступное — приглушённым, как было
         pal.setColor(QPalette.ColorGroup.Disabled, getattr(QPalette.ColorRole, role), muted)
-    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Highlight, QColor(c["border"]))
     return pal
+
+
+# Подсказка у цветовых палитр без своих ToolTipBase / ToolTipText — стандартная Qt (как была от системной палитры).
+_TIP_BASE, _TIP_TEXT = "#ffffdc", "#000000"
+
+
+def _custom_palette(spec):
+    """Цветовая палитра (CUSTOM_PALETTES) — общий модуль qt_base, с нуля: роли из spec, объём (Light … Shadow) —
+    от Window, недоступный текст — цветом PlaceholderText."""
+    base = QColor(spec.get("Window", "#888888"))
+    return qt_base.make_palette(
+        window=spec["Window"], text=spec["Text"], highlight=spec["Highlight"], base=spec.get("Base"),
+        alt_base=spec.get("AlternateBase"), button=spec.get("Button"), button_text=spec.get("ButtonText"),
+        highlighted_text=spec.get("HighlightedText", "#ffffff"), muted=spec.get("PlaceholderText"),
+        placeholder=spec.get("PlaceholderText"), tooltip_base=spec.get("ToolTipBase", _TIP_BASE),
+        tooltip_text=spec.get("ToolTipText", _TIP_TEXT), link=spec.get("Link"), disabled_base=spec.get("Base"),
+        disabled_highlight=spec["Highlight"], light=base.lighter(130).name(), midlight=base.lighter(115).name(),
+        mid=base.darker(115).name(), dark=base.darker(150).name(), shadow=base.darker(200).name())
 
 
 def apply_style(app, style_name, default_style_name, default_palette):
@@ -542,8 +558,7 @@ def apply_style(app, style_name, default_style_name, default_palette):
             app.setStyle("Fusion")
         c = dict(MODERN_THEMES[style_name])
         c.setdefault("close", CLOSE_RED)
-        app.setPalette(_modern_palette(c))
-        app.setStyleSheet(modern_qss(c) + dialogs_qss(c) + chrome_qss(c))
+        qt_base.apply_theme(app, palette=_modern_palette(c), qss=modern_qss(c) + dialogs_qss(c) + chrome_qss(c))
         return c
 
     if style_name == SYSTEM_DEFAULT:
@@ -557,24 +572,7 @@ def apply_style(app, style_name, default_style_name, default_palette):
     elif style_name in CUSTOM_PALETTES:
         if "Fusion" in QStyleFactory.keys():
             app.setStyle("Fusion")
-        spec = CUSTOM_PALETTES[style_name]
-        pal = QPalette()
-        for role_name, hex_color in spec.items():
-            try:
-                role = getattr(QPalette.ColorRole, role_name)
-            except AttributeError:
-                continue
-            pal.setColor(role, QColor(hex_color))
-        base = QColor(spec.get("Window", "#888888"))
-        pal.setColor(QPalette.ColorRole.Light,    base.lighter(130))
-        pal.setColor(QPalette.ColorRole.Midlight, base.lighter(115))
-        pal.setColor(QPalette.ColorRole.Mid,      base.darker(115))
-        pal.setColor(QPalette.ColorRole.Dark,     base.darker(150))
-        pal.setColor(QPalette.ColorRole.Shadow,   base.darker(200))
-        muted = pal.color(QPalette.ColorRole.PlaceholderText)
-        for role in ("WindowText", "Text", "ButtonText"):
-            pal.setColor(QPalette.ColorGroup.Disabled, getattr(QPalette.ColorRole, role), muted)
-        app.setPalette(pal)
+        app.setPalette(_custom_palette(CUSTOM_PALETTES[style_name]))
     c = derive_theme_colors(app.palette())
     c["close"] = CLOSE_RED
     # Цветовые палитры (Fusion) — диалоги тоже по QSS; системные стили Qt
@@ -5125,94 +5123,25 @@ def make_icons():
 
 # ----------------------- Windows: таскбар и DWM-заголовки -----------------------
 def set_app_user_model_id():
-    """Своя группа в таскбаре Windows (иначе иконка — от python.exe)."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
-    except Exception:
-        pass
+    """Своя группа в таскбаре Windows (иначе иконка — от python.exe) — общий модуль qt_base."""
+    qt_base.set_app_id(APP_USER_MODEL_ID)
 
 
-def _colorref(hex_color):
-    q = QColor(hex_color)
-    return q.red() | (q.green() << 8) | (q.blue() << 16)
-
-
-def dwm_style_window(widget, c):
-    """Системный заголовок окна (диалоги) — в цветах темы. Windows 10/11."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        from ctypes import wintypes
-        hwnd = wintypes.HWND(int(widget.winId()))
-        dwm = ctypes.windll.dwmapi
-        dark = ctypes.c_int(1 if theme_is_dark(c) else 0)
-        # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 20H1+), 19 — старые сборки Win10.
-        if dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark)) != 0:
-            dwm.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(dark), ctypes.sizeof(dark))
-        # 35 = DWMWA_CAPTION_COLOR, 36 = DWMWA_TEXT_COLOR (только Win11, на Win10 — без эффекта).
-        for attr, key in ((35, "card"), (36, "text")):
-            val = ctypes.c_uint(_colorref(c[key]))
-            dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
-        user32 = ctypes.windll.user32
-        if user32.IsWindowVisible(hwnd):
-            # Уже показано — перерисовать рамку: SWP_NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED.
-            user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
-    except Exception:
-        pass
-
-
-class DwmThemer(QObject):
-    """Фильтр событий на всё приложение: каждое показываемое окно/диалог
-    с системной рамкой получает тёмный/светлый заголовок по теме."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.c = None
-
-    @staticmethod
-    def eligible(w):
-        if not isinstance(w, QWidget) or not w.isWindow():
-            return False
-        if w.windowFlags() & Qt.FramelessWindowHint:
-            return False
-        return w.windowType() in (Qt.Window, Qt.Dialog, Qt.Tool)
-
-    def set_colors(self, c):
-        self.c = c
-        for w in QApplication.topLevelWidgets():
-            if w.isVisible() and self.eligible(w):
-                dwm_style_window(w, c)
-
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.Show and self.c is not None and self.eligible(obj):
-            dwm_style_window(obj, self.c)
-        return False
-
-
-_DWM_THEMER = None
+_TITLE_BARS = None    # qt_base.TitleBars: системная полоса диалогов — в цвет темы (до показа)
 
 
 def install_dwm_themer(app):
-    global _DWM_THEMER
-    if sys.platform != "win32" or _DWM_THEMER is not None:
-        return
-    try:
-        _DWM_THEMER = DwmThemer(app)
-        app.installEventFilter(_DWM_THEMER)
-    except Exception:
-        _DWM_THEMER = None
+    """Фильтр событий на всё приложение (общий модуль qt_base): каждое показываемое окно / диалог с системной
+    рамкой получает тёмный / светлый заголовок и цвет полосы по теме (Windows 10/11)."""
+    global _TITLE_BARS
+    if _TITLE_BARS is None:
+        _TITLE_BARS = qt_base.TitleBars(app)
 
 
 def dwm_set_theme(c):
-    if _DWM_THEMER is not None:
-        try:
-            _DWM_THEMER.set_colors(c)
-        except Exception:
-            pass
+    """Сменили тему — полосы диалогов (и уже открытых) в цвет темы: фон — card, текст — text."""
+    if _TITLE_BARS is not None:
+        _TITLE_BARS.set_colors(c["card"], c["text"], theme_is_dark(c))
 
 
 # ----------------------- Своя рамка окна (0.8.3) -----------------------
@@ -7649,7 +7578,8 @@ def create_app(argv=None):
     app = QApplication.instance() or QApplication(list(argv) if argv is not None else sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True)
+    # окна файлов — Qt (в цветах темы); стиль (Fusion / системный) — по выбранной теме, в apply_style
+    qt_base.setup_app(app, fusion=False, qt_dialogs=True)
     # Русские кнопки в Qt-диалогах («Да/Нет/Отмена», диалог выбора файлов).
     try:
         from PySide6.QtCore import QTranslator, QLibraryInfo, QLocale
@@ -7799,6 +7729,7 @@ def run_selftest():
             assert not errs, "; ".join(errs[:3])
             return f"{mod.__name__} {mod.VERSION}"
         return run
+    check("основа окна: тема, палитра, полоса диалогов (qt_base)", _shared(qt_base))
     check("надёжная запись настроек (safe_json)", _shared(safe_json))
     check("журнал программы (app_log)", _shared(app_log))
 
