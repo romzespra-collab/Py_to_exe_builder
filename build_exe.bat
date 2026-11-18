@@ -2,15 +2,15 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-title Сборка py_to_exe_builder v0.10.0
+title Сборка py_to_exe_builder v0.11.0
 
 rem ============================================================
-rem  build_exe.bat  v0.10.0 — сборка py_to_exe_builder.exe
+rem  build_exe.bat  v0.11.0 — сборка py_to_exe_builder.exe
 rem  Результат: dist\py_to_exe_builder.exe
 rem ============================================================
 
 echo.
-echo === [1/4] Проверка Python ===
+echo === [1/5] Проверка Python ===
 set "PY=python"
 python --version >nul 2>nul
 if errorlevel 1 set "PY=py -3"
@@ -21,7 +21,15 @@ if errorlevel 1 (
 )
 
 echo.
-echo === [2/4] Установка библиотек: requirements.txt + PyInstaller ===
+echo === [2/5] Проверка утечек (токены, пароли) ===
+%PY% check_leaks.py
+if errorlevel 1 (
+    echo ОШИБКА: найдены секреты — сборка остановлена.
+    pause & exit /b 1
+)
+
+echo.
+echo === [3/5] Установка библиотек: requirements.txt + PyInstaller ===
 %PY% -m pip install --disable-pip-version-check -r requirements.txt
 if errorlevel 1 (
     echo ОШИБКА: не удалось установить библиотеки из requirements.txt
@@ -34,7 +42,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo === [3/4] Сборка PyInstaller: py_to_exe_builder.spec ===
+echo === [4/5] Сборка PyInstaller: py_to_exe_builder.spec ===
 %PY% -m PyInstaller --noconfirm --clean py_to_exe_builder.spec
 if errorlevel 1 (
     echo ОШИБКА: PyInstaller завершился с ошибкой — смотри вывод выше.
@@ -46,7 +54,7 @@ if not exist "dist\py_to_exe_builder.exe" (
 )
 
 echo.
-echo === [4/4] Самопроверка: dist\py_to_exe_builder.exe --selftest ===
+echo === [5/5] Самопроверка: dist\py_to_exe_builder.exe --selftest ===
 if exist "dist\selftest.txt" del /q "dist\selftest.txt"
 start "" /wait "dist\py_to_exe_builder.exe" --selftest
 set "RC=%errorlevel%"

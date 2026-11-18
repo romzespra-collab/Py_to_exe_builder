@@ -1,0 +1,26 @@
+{
+  "repo": "romzespra-collab/Py_to_exe_builder",
+  "programs": [
+    {
+      "name": "py_to_exe_builder",
+      "dir": "",
+      "files": [
+        ["py_to_exe_builder.pyw", "APP_VERSION = \"{v}\""],
+        ["py_to_exe_builder.pyw", "py_to_exe_builder.pyw  v{v}"],
+        ["py_to_exe_builder.pyw", "Версия: {v}  "],
+        ["py_to_exe_builder.spec", "py_to_exe_builder.spec  v{v}"],
+        ["build_exe.bat", "title Сборка py_to_exe_builder v{v}"],
+        ["build_exe.bat", "build_exe.bat  v{v}"],
+        ["CHANGELOG.txt", "Последняя версия — {v}."]
+      ],
+      "headers": false,
+      "changelog": [
+        {"file": "CHANGELOG.txt", "before": "re:^\\d+\\.\\d+\\.\\d+:", "template": "{v}:\n  {msg}\n\n",
+         "wrap": 78, "keep": 10, "tail": "Более ранние версии"},
+        {"file": "py_to_exe_builder.pyw", "before": "re:^Изменения \\d", "template": "Изменения {v}:\n- {msg}\n\n",
+         "wrap": 90, "keep": 10, "tail": "Более ранние версии"}
+      ],
+      "allow_in_zip": []
+    }
+  ]
+}

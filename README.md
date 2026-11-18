@@ -51,10 +51,16 @@
 
 ## Сборка в EXE
 
-Двойной клик по `build_exe.bat`: проверка Python → `pip install -r
+Двойной клик по `build_exe.bat`: проверка Python → поиск утечек
+(`check_leaks.py`: токены, пароли) → `pip install -r
 requirements.txt` + PyInstaller → сборка по `py_to_exe_builder.spec` →
 `dist\py_to_exe_builder.exe --selftest` (ошибка — сборка остановится).
 Готовый файл: `dist\py_to_exe_builder.exe`.
+
+Новая версия (для разработки): `python bump_version.py minor -m "что нового"` —
+версия во всех местах из `release.json` и запись в `CHANGELOG.txt`; после
+commit — `python release.py`: архив `release/py_to_exe_builder_vX.Y.Z.zip`
+(старый удаляется, архив проверяется на утечки).
 
 ## Файлы
 
@@ -69,3 +75,6 @@ requirements.txt` + PyInstaller → сборка по `py_to_exe_builder.spec` �
 | `test_gh_update.pyw` | тесты модуля обновления без сети |
 | `app_icon.py`, `app_icon_qt.py`, `app_icon_pack.dat` | значок программы (общий модуль app_icon): окно выбора, встроенная база ~370 значков (Material Design Icons — Apache 2.0, Simple Icons — CC0) |
 | `app_icon.json`, `py_to_exe_builder.ico` | выбранный значок (появляются после «Применить», файлы пользователя) |
+| `safe_json.py` | надёжная запись JSON: атомарно, `.bak`, битый файл не затирается (общий модуль; настройки сборщика — в реестре Windows, QSettings) |
+| `app_log.py` | журнал (общий модуль): след необработанной ошибки — в `py_to_exe_builder_crash.log` (появляется только при ней), пароли и токены в нём скрыты |
+| `bump_version.py`, `release.py`, `check_leaks.py`, `release.json` | для разработки: версия во всех местах, архив в `release/`, поиск утечек (общие утилиты, в EXE не входят) |

@@ -2,6 +2,10 @@ __pycache__/
 build/
 dist/
 *.log
+*.log.*
+*.bak
+*.tmp
+*.bad-*
 selftest.txt
 config.json
 *.zip

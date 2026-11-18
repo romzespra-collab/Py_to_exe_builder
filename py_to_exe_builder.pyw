@@ -1,7 +1,14 @@
 """
-py_to_exe_builder.pyw  v0.10.0
+py_to_exe_builder.pyw  v0.11.0
 Py To EXE Builder
-Версия: 0.10.0  (PySide6 / Qt6)
+Версия: 0.11.0  (PySide6 / Qt6)
+
+Изменения 0.11.0:
+- 🧩 Общие модули: safe_json 1.1.1 (надёжная запись JSON; настройки — по-прежнему QSettings) и
+  app_log 1.2.1 — необработанная ошибка сборщика пишется в py_to_exe_builder_crash.log
+  (пароли и токены скрыты; своего файла журнала нет — журнал в окне). Самопроверка — пункты
+  safe_json, app_log и «версия во всех местах» (release.json). Для разработки —
+  bump_version.py / release.py / check_leaks.py; в build_exe.bat — поиск утечек.
 
 Изменения 0.10.0:
 - 🖼 Значок программы: окно выбора (общий модуль app_icon 1.2.0) — меню ⋯ →
@@ -53,14 +60,10 @@ Py To EXE Builder
 - 🔄 Обновление с GitHub (gh_update 1.2.0): старый код, которого нет в новой
   версии, стирается; резервной папки backup больше нет; настройки не трогает.
 
-Изменения 0.9.2:
-- 🔄 Обновление: модуль gh_update 1.1.3 — в облаке анимации значок GitHub над
-  надписью; архив докачивается при обрыве.
-
 Более ранние версии — в истории git.
 """
 
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.11.0"
 APP_NAME = "Py To EXE Builder"
 APP_AUTHOR = "RomzesPRA-2026"
 APP_USER_MODEL_ID = "PyToExeBuilder.App"
@@ -220,6 +223,8 @@ from PySide6.QtWidgets import (
 
 import app_icon          # 0.10.0: общий модуль «Значок программы» (окно выбора — app_icon_qt)
 import app_icon_qt
+import app_log           # 0.11.0: общий модуль журнала: след падений — в py_to_exe_builder_crash.log
+import safe_json         # 0.11.0: общий модуль надёжной записи JSON (настройки — QSettings, им не нужен)
 
 
 # Диалоги выбора файлов — Qt-шные (не системные), чтобы были в цветах темы.
@@ -7788,6 +7793,29 @@ def run_selftest():
         return f"app_icon {app_icon.VERSION}, окно выбора собирается"
     check("значок программы (app_icon)", _app_icon)
 
+    def _shared(mod):
+        def run():
+            errs = mod.selftest()
+            assert not errs, "; ".join(errs[:3])
+            return f"{mod.__name__} {mod.VERSION}"
+        return run
+    check("надёжная запись настроек (safe_json)", _shared(safe_json))
+    check("журнал программы (app_log)", _shared(app_log))
+
+    def _release_cfg():
+        """release.json: версия во всех местах одна (утилиты bump_version / release / check_leaks)."""
+        if getattr(sys, "frozen", False) or not (APP_ROOT / "release.json").exists():
+            return "пропущено (нет release.json)"
+        rel = importlib.import_module("release")
+        importlib.import_module("bump_version")
+        importlib.import_module("check_leaks")
+        cfg = rel.load_config(str(APP_ROOT / "release.json"))
+        for prog in cfg["programs"]:
+            got = rel.check_versions(prog, str(APP_ROOT))
+            assert got == (APP_VERSION, []), f"{prog['name']}: {got}"
+        return ""
+    check("версия во всех местах (release.json)", _release_cfg)
+
     win = holder.get("win")
     if win is not None:
         win._save_timer.stop()
@@ -7805,6 +7833,9 @@ def run_selftest():
 def main():
     if "--selftest" in sys.argv:
         sys.exit(run_selftest())
+    # 0.11.0: общий модуль app_log — своего файла журнала у сборщика нет (журнал — в окне), поэтому
+    # file=False: только след необработанной ошибки в py_to_exe_builder_crash.log (появляется при ней).
+    app_log.setup("py_to_exe_builder", APP_ROOT, file=False)
     app = create_app()
     # 0.9.0: после обновления — подождать, пока старая копия закроется
     import gh_update
