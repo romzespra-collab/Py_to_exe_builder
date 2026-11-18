@@ -22,15 +22,10 @@ if errorlevel 1 (
 
 echo.
 echo === [2/5] Проверка утечек (токены, пароли) ===
-rem в папке без .git (архив, обновление) check_leaks проверял бы её как сборку: свои настройки, журналы — не утечка
-if exist .git (
-    %PY% check_leaks.py
-    if errorlevel 1 (
-        echo ОШИБКА: найдены секреты — сборка остановлена.
-        pause & exit /b 1
-    )
-) else (
-    echo Не репозиторий git — проверка пропущена.
+%PY% check_leaks.py
+if errorlevel 1 (
+    echo ОШИБКА: найдены секреты — сборка остановлена.
+    pause & exit /b 1
 )
 
 echo.

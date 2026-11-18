@@ -4,8 +4,8 @@ Py To EXE Builder
 Версия: 0.11.0  (PySide6 / Qt6)
 
 Изменения 0.11.0:
-- 🧩 Общие модули: safe_json 1.0.0 (надёжная запись JSON; настройки — по-прежнему QSettings) и
-  app_log 1.1.0 — необработанная ошибка сборщика пишется в py_to_exe_builder_crash.log
+- 🧩 Общие модули: safe_json 1.1.0 (надёжная запись JSON; настройки — по-прежнему QSettings) и
+  app_log 1.2.0 — необработанная ошибка сборщика пишется в py_to_exe_builder_crash.log
   (пароли и токены скрыты; своего файла журнала нет — журнал в окне). Самопроверка — пункты
   safe_json, app_log и «версия во всех местах» (release.json). Для разработки —
   bump_version.py / release.py / check_leaks.py; в build_exe.bat — поиск утечек.

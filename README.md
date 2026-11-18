@@ -52,7 +52,7 @@
 ## Сборка в EXE
 
 Двойной клик по `build_exe.bat`: проверка Python → поиск утечек
-(`check_leaks.py`: токены, пароли; в папке-репозитории git) → `pip install -r
+(`check_leaks.py`: токены, пароли) → `pip install -r
 requirements.txt` + PyInstaller → сборка по `py_to_exe_builder.spec` →
 `dist\py_to_exe_builder.exe --selftest` (ошибка — сборка остановится).
 Готовый файл: `dist\py_to_exe_builder.exe`.
